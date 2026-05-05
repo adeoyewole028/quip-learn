@@ -8,7 +8,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Progress } from '@/components/ui/progress';
 import {
   ChevronLeft, CheckCircle2, PlayCircle, FileText, HelpCircle,
-  PenLine, BookOpen, AlertCircle, ChevronRight,
+  PenLine, BookOpen, AlertCircle, ChevronRight, Layers3, X,
 } from 'lucide-react';
 
 const lessonTypeLabel: Record<string, string> = {
@@ -33,8 +33,13 @@ export default function CourseDetailPage() {
   const course = (location.state as { course?: Course } | null)?.course ?? null;
 
   const [modules, setModules] = useState<Module[]>([]);
+  const [selectedModule, setSelectedModule] = useState<Module | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  const sortedModules = modules
+    .slice()
+    .sort((a, b) => Number(a.order_index) - Number(b.order_index));
 
   useEffect(() => {
     if (!id) return;
@@ -57,6 +62,12 @@ export default function CourseDetailPage() {
   const completed = allLessons.filter((l) => l.completed).length;
   const progress = allLessons.length ? Math.round((completed / allLessons.length) * 100) : 0;
 
+  const selectedModuleLessons = selectedModule
+    ? selectedModule.lessons
+        .slice()
+        .sort((a, b) => Number(a.order_index ?? 0) - Number(b.order_index ?? 0))
+    : [];
+
   return (
     <div className="max-w-3xl mx-auto px-4 sm:px-6 py-8">
       {/* Back breadcrumb */}
@@ -78,7 +89,7 @@ export default function CourseDetailPage() {
               className="w-full h-48 object-cover"
             />
           ) : (
-            <div className="w-full h-48 bg-gradient-to-br from-primary/20 via-accent to-primary/5 flex items-center justify-center">
+            <div className="w-full h-48 bg-linear-to-br from-primary/20 via-accent to-primary/5 flex items-center justify-center">
               <BookOpen className="w-12 h-12 text-primary/50" />
             </div>
           )}
@@ -120,54 +131,152 @@ export default function CourseDetailPage() {
           <p className="text-sm">No modules found.</p>
         </div>
       ) : (
-        <div className="space-y-6">
-          {modules
-            .slice()
-            .sort((a, b) => Number(a.order_index) - Number(b.order_index))
-            .map((module, idx) => (
-              <div key={module.id}>
-                <div className="flex items-center gap-2 mb-2 px-1">
-                  <span className="flex h-5 w-5 items-center justify-center rounded-full bg-primary/10 text-primary text-[10px] font-bold shrink-0">
-                    {idx + 1}
-                  </span>
-                  <h2 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">
-                    {module.title}
-                  </h2>
-                </div>
-                <Card className="overflow-hidden">
-                  <CardContent className="p-0 divide-y">
-                    {module.lessons
-                      .slice()
-                      .sort((a, b) => Number(a.order_index ?? 0) - Number(b.order_index ?? 0))
-                      .map((lesson) => (
-                        <button
+        <div className="space-y-4">
+          {sortedModules.map((module, idx) => {
+            const moduleLessons = module.lessons
+              .slice()
+              .sort((a, b) => Number(a.order_index ?? 0) - Number(b.order_index ?? 0));
+            const moduleCompleted = moduleLessons.filter((lesson) => lesson.completed).length;
+
+            return (
+              <button
+                key={module.id}
+                type="button"
+                onClick={() => setSelectedModule(module)}
+                className="group block w-full text-left"
+              >
+                <Card className="overflow-hidden border transition-all hover:-translate-y-0.5 hover:border-primary/40 hover:shadow-lg">
+                  <CardContent className="px-5 py-5">
+                    <div className="flex flex-wrap items-start justify-between gap-4">
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2">
+                          <span className="flex h-6 w-6 items-center justify-center rounded-full bg-primary/10 text-[11px] font-bold text-primary shrink-0">
+                            {idx + 1}
+                          </span>
+                          <span className="text-xs font-semibold uppercase tracking-[0.22em] text-muted-foreground">
+                            {module.title}
+                          </span>
+                        </div>
+
+                        <div className="mt-4 flex items-start gap-3">
+                          <span className="mt-0.5 flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-primary/10 text-primary">
+                            <Layers3 className="h-5 w-5" />
+                          </span>
+                          <div className="min-w-0">
+                            <p className="text-lg font-semibold tracking-tight text-foreground transition-colors group-hover:text-primary">
+                              Lesson {idx + 1}
+                            </p>
+                            <p className="mt-1 text-sm leading-6 text-muted-foreground">
+                              {moduleLessons.length} learning item{moduleLessons.length === 1 ? '' : 's'} inside this stack.
+                              Click to open the lesson list.
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-3 rounded-2xl border bg-muted/30 px-3 py-2 text-sm text-muted-foreground">
+                        <span>
+                          {moduleCompleted}/{moduleLessons.length} done
+                        </span>
+                        <ChevronRight className="h-4 w-4 transition-transform group-hover:translate-x-0.5" />
+                      </div>
+                    </div>
+
+                    <div className="mt-5 flex flex-wrap gap-2">
+                      {moduleLessons.slice(0, 3).map((lesson) => (
+                        <span
                           key={lesson.id}
-                          onClick={() => navigate(`/lessons/${lesson.id}`)}
-                          className="group w-full flex items-center gap-3 px-4 py-3.5 hover:bg-muted/50 transition-colors text-left"
+                          className="inline-flex items-center gap-1.5 rounded-full bg-accent px-3 py-1 text-xs font-medium text-accent-foreground"
                         >
-                          <span className="shrink-0">
-                            {lessonIcon[lesson.type] ?? <FileText className="w-4 h-4" />}
-                          </span>
-                          <span className="flex-1 min-w-0">
-                            <span className="block text-sm font-medium truncate group-hover:text-primary transition-colors">
-                              {lesson.title}
-                            </span>
-                            <span className="block text-xs text-muted-foreground mt-0.5">
-                              {lessonTypeLabel[lesson.type] ?? lesson.type}
-                              {lesson.duration ? ` · ${lesson.duration}` : ''}
-                            </span>
-                          </span>
-                          {lesson.completed ? (
-                            <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" />
-                          ) : (
-                            <ChevronRight className="w-4 h-4 text-muted-foreground/50 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity" />
-                          )}
-                        </button>
+                          {lessonIcon[lesson.type] ?? <FileText className="w-3.5 h-3.5" />}
+                          {lesson.title}
+                        </span>
                       ))}
+                      {moduleLessons.length > 3 && (
+                        <span className="inline-flex items-center rounded-full border px-3 py-1 text-xs font-medium text-muted-foreground">
+                          +{moduleLessons.length - 3} more
+                        </span>
+                      )}
+                    </div>
                   </CardContent>
                 </Card>
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      {selectedModule && (
+        <div
+          className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 p-0 sm:items-center sm:p-6"
+          onClick={() => setSelectedModule(null)}
+          role="presentation"
+        >
+          <Card
+            className="max-h-[88vh] w-full max-w-2xl overflow-hidden rounded-t-3xl border bg-card shadow-2xl sm:rounded-3xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <CardContent className="p-0">
+              <div className="flex items-start justify-between gap-4 border-b px-6 py-5">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-semibold uppercase tracking-[0.22em] text-muted-foreground">
+                      {selectedModule.title}
+                    </span>
+                    <Badge variant="secondary">{selectedModuleLessons.length} lessons</Badge>
+                  </div>
+                  <h2 className="mt-2 text-xl font-semibold tracking-tight text-foreground">
+                    Open a lesson from this stack
+                  </h2>
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    Choose one of the lessons below to continue learning.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setSelectedModule(null)}
+                  className="inline-flex h-9 w-9 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                  aria-label="Close lesson list"
+                >
+                  <X className="h-4 w-4" />
+                </button>
               </div>
-            ))}
+
+              <div className="max-h-[calc(88vh-6.5rem)] overflow-y-auto px-3 py-3">
+                <div className="space-y-2">
+                  {selectedModuleLessons.map((lesson) => (
+                    <button
+                      key={lesson.id}
+                      type="button"
+                      onClick={() => {
+                        setSelectedModule(null);
+                        navigate(`/lessons/${lesson.id}`);
+                      }}
+                      className="group flex w-full items-center gap-3 rounded-2xl px-4 py-4 text-left transition-colors hover:bg-muted/50"
+                    >
+                      <span className="shrink-0">
+                        {lessonIcon[lesson.type] ?? <FileText className="w-4 h-4" />}
+                      </span>
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-sm font-medium transition-colors group-hover:text-primary">
+                          {lesson.title}
+                        </span>
+                        <span className="mt-0.5 block text-xs text-muted-foreground">
+                          {lessonTypeLabel[lesson.type] ?? lesson.type}
+                          {lesson.duration ? ` · ${lesson.duration}` : ''}
+                        </span>
+                      </span>
+                      {lesson.completed ? (
+                        <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-500" />
+                      ) : (
+                        <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground/60 transition-transform group-hover:translate-x-0.5" />
+                      )}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </CardContent>
+          </Card>
         </div>
       )}
     </div>

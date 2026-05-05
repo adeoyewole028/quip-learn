@@ -36,6 +36,12 @@ export interface LoginPayload {
   password: string;
 }
 
+export interface ChangePasswordPayload {
+  email: string;
+  old_password: string;
+  new_password: string;
+}
+
 export interface Module {
   id: string;
   course_id: string;

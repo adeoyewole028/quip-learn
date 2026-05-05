@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react';
+
+import { useEffect, useEffectEvent, useRef, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { getLesson, completeLesson, submitQuiz, submitAssignmentFile } from '@/lib/api/lms';
 import type { Lesson, RawQuizQuestion, TextLessonContent, VideoLessonContent, QuizLessonContent, AssignmentLessonContent, VideoProvider } from '@/types/lms';
@@ -44,6 +45,40 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Card, CardContent } from '@/components/ui/card';
 import { CheckCircle2, ChevronLeft, AlertCircle, FileText, PlayCircle, HelpCircle, PenLine, Paperclip } from 'lucide-react';
 
+interface QuizResult {
+  totalQuestions: number;
+  correctAnswers: number;
+  percentageScore: number;
+  timedOut: boolean;
+}
+
+function parseDurationToSeconds(duration?: string): number | null {
+  if (!duration) return null;
+  const raw = duration.trim().toLowerCase();
+  if (!raw) return null;
+
+  // Supports values like: "23" (minutes), "23m", "45s", "01:30".
+  if (/^\d+$/.test(raw)) return Number(raw) * 60;
+  if (/^\d+m$/.test(raw)) return Number(raw.slice(0, -1)) * 60;
+  if (/^\d+s$/.test(raw)) return Number(raw.slice(0, -1));
+
+  const timeParts = raw.match(/^(\d{1,2}):(\d{2})$/);
+  if (timeParts) {
+    const minutes = Number(timeParts[1]);
+    const seconds = Number(timeParts[2]);
+    return minutes * 60 + seconds;
+  }
+
+  return null;
+}
+
+function formatCountdown(totalSeconds: number): string {
+  const safeSeconds = Math.max(0, totalSeconds);
+  const minutes = Math.floor(safeSeconds / 60);
+  const seconds = safeSeconds % 60;
+  return `${minutes}:${String(seconds).padStart(2, '0')}`;
+}
+
 const lessonTypeIcon: Record<string, React.ReactNode> = {
   text: <FileText className="w-4 h-4" />,
   video: <PlayCircle className="w-4 h-4" />,
@@ -70,17 +105,77 @@ export default function LessonPage() {
 
   // Quiz state
   const [answers, setAnswers] = useState<Record<number, number>>({});
+  const [quizResult, setQuizResult] = useState<QuizResult | null>(null);
+  const [quizTimeLeftSeconds, setQuizTimeLeftSeconds] = useState<number | null>(null);
+  const autoSubmitTriggeredRef = useRef(false);
   // Assignment state
   const [assignmentText, setAssignmentText] = useState('');
   const [assignmentFile, setAssignmentFile] = useState<File | null>(null);
 
+  let quizQuestions: RawQuizQuestion[] = [];
+  let quizQuestionsError: string | null = null;
+
+  if (lesson?.type === 'quiz' && lesson.content) {
+    try {
+      quizQuestions = JSON.parse((lesson.content as QuizLessonContent).questions_json) as RawQuizQuestion[];
+    } catch {
+      quizQuestionsError = 'Failed to parse quiz questions.';
+    }
+  }
+
   useEffect(() => {
     if (!id) return;
+
+    let cancelled = false;
+
     getLesson(id)
-      .then(setLesson)
-      .catch((err: Error) => setError(err.message))
-      .finally(() => setLoading(false));
+      .then((nextLesson) => {
+        if (cancelled) return;
+        setLesson(nextLesson);
+        setAnswers({});
+        setQuizResult(null);
+        setDone(false);
+        setQuizTimeLeftSeconds(
+          nextLesson.type === 'quiz' ? parseDurationToSeconds(nextLesson.duration) : null,
+        );
+        autoSubmitTriggeredRef.current = false;
+      })
+      .catch((err: Error) => {
+        if (cancelled) return;
+        setError(err.message);
+      })
+      .finally(() => {
+        if (cancelled) return;
+        setLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, [id]);
+
+  useEffect(() => {
+    if (
+      !lesson ||
+      lesson.type !== 'quiz' ||
+      done ||
+      submitting ||
+      quizTimeLeftSeconds === null ||
+      quizTimeLeftSeconds <= 0
+    ) {
+      return;
+    }
+
+    const timer = window.setInterval(() => {
+      setQuizTimeLeftSeconds((prev) => {
+        if (prev === null) return null;
+        if (prev <= 1) return 0;
+        return prev - 1;
+      });
+    }, 1000);
+
+    return () => window.clearInterval(timer);
+  }, [lesson, done, submitting, quizTimeLeftSeconds]);
 
   async function handleMarkComplete() {
     if (!id) return;
@@ -95,31 +190,55 @@ export default function LessonPage() {
     }
   }
 
-  async function handleQuizSubmit() {
+  async function handleQuizSubmit(timedOut: boolean = false) {
     if (!id) return;
-    if (!lesson || lesson.type !== 'quiz' || !lesson.content) return;
+    if (!lesson || lesson.type !== 'quiz') return;
+    if (!user?.id) {
+      setError('You must be logged in to submit this quiz.');
+      return;
+    }
+
+    if (!timedOut) {
+      // Block manual submit if time already ran out; auto-submit effect handles that case.
+      autoSubmitTriggeredRef.current = true;
+    }
+
     setSubmitting(true);
     try {
-      const qc = lesson.content as QuizLessonContent;
-      let questions: RawQuizQuestion[];
-      try {
-        questions = JSON.parse(qc.questions_json) as RawQuizQuestion[];
-      } catch {
-        setError('Failed to parse quiz questions.');
+      if (quizQuestionsError) {
+        setError(quizQuestionsError);
         return;
       }
 
-      const totalQuestions = questions.length;
-      const correctAnswers = questions.reduce((count, question, index) => {
+      if (quizQuestions.length === 0) {
+        setError('Failed to load quiz questions.');
+        return;
+      }
+
+      const totalQuestions = quizQuestions.length;
+      const correctAnswers = quizQuestions.reduce((count, question, index) => {
         return answers[index] === question.c ? count + 1 : count;
       }, 0);
-      const score = totalQuestions > 0 ? Math.round((correctAnswers / totalQuestions) * 100) : 0;
+      const percentageScore = totalQuestions > 0 ? Math.round((correctAnswers / totalQuestions) * 100) : 0;
+
+      const normalizedAnswers = quizQuestions.reduce<Record<number, number>>((acc, _question, index) => {
+        acc[index] = typeof answers[index] === 'number' ? answers[index] : -1;
+        return acc;
+      }, {});
 
       await submitQuiz({
         lessonId: id,
-        user_id: user!.id,
-        score,
-        answers,
+        user_id: user.id,
+        score: percentageScore,
+        answers: normalizedAnswers,
+      });
+
+      // Set result AFTER successful submit so timedOut is always accurate.
+      setQuizResult({
+        totalQuestions,
+        correctAnswers,
+        percentageScore,
+        timedOut,
       });
       setDone(true);
     } catch (err) {
@@ -128,6 +247,17 @@ export default function LessonPage() {
       setSubmitting(false);
     }
   }
+
+  const submitQuizOnTimeout = useEffectEvent(() => {
+    void handleQuizSubmit(true);
+  });
+
+  useEffect(() => {
+    if (!lesson || lesson.type !== 'quiz') return;
+    if (done || submitting || quizTimeLeftSeconds !== 0 || autoSubmitTriggeredRef.current) return;
+    autoSubmitTriggeredRef.current = true;
+    submitQuizOnTimeout();
+  }, [done, lesson, quizTimeLeftSeconds, submitting]);
 
   async function handleAssignmentSubmit() {
     if (!id) return;
@@ -186,6 +316,17 @@ export default function LessonPage() {
               {lesson.duration && (
                 <span className="text-xs text-muted-foreground">{lesson.duration}</span>
               )}
+              {lesson.type === 'quiz' && quizTimeLeftSeconds !== null && !done && (
+                <span
+                  className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${
+                    quizTimeLeftSeconds <= 60
+                      ? 'bg-destructive/10 text-destructive'
+                      : 'bg-muted text-muted-foreground'
+                  }`}
+                >
+                  Time left: {formatCountdown(quizTimeLeftSeconds)}
+                </span>
+              )}
               {lesson.completed && (
                 <span className="inline-flex items-center gap-1 text-xs text-emerald-600 dark:text-emerald-400 font-medium">
                   <CheckCircle2 className="w-3.5 h-3.5" />
@@ -209,8 +350,17 @@ export default function LessonPage() {
                   : 'Lesson complete!'}
               </p>
               <p className="text-sm text-muted-foreground max-w-xs">
-                Great work! Keep up the momentum.
+                {lesson.type === 'quiz' && quizResult
+                  ? `You got ${quizResult.correctAnswers} of ${quizResult.totalQuestions} correct (${quizResult.percentageScore}%).`
+                  : 'Great work! Keep up the momentum.'}
               </p>
+              {lesson.type === 'quiz' && quizResult && (
+                <div className="text-sm text-muted-foreground">
+                  Score: <span className="font-semibold text-foreground">{quizResult.correctAnswers}/{quizResult.totalQuestions}</span>
+                  {' '}({quizResult.percentageScore}%)
+                  {quizResult.timedOut ? ' - auto-submitted when time expired.' : ' - submitted successfully.'}
+                </div>
+              )}
               <Button variant="outline" onClick={() => navigate(-1)} className="mt-2">
                 Back to course
               </Button>
@@ -249,22 +399,20 @@ export default function LessonPage() {
 
               {/* Quiz */}
               {lesson.type === 'quiz' && lesson.content && (() => {
-                const qc = lesson.content as QuizLessonContent;
-                let questions: RawQuizQuestion[];
-                try {
-                  questions = JSON.parse(qc.questions_json) as RawQuizQuestion[];
-                } catch {
-                  return <p className="text-destructive text-sm">Failed to load quiz questions.</p>;
+                if (quizQuestionsError) {
+                  return <p className="text-destructive text-sm">{quizQuestionsError}</p>;
                 }
-                // const passingScore = qc.passing_score ? Number(qc.passing_score) : null;
+                if (quizQuestions.length === 0) {
+                  return <p className="text-muted-foreground text-sm">No quiz questions available.</p>;
+                }
                 return (
                   <div className="space-y-5 mb-8">
-                    {/* {passingScore !== null && (
-                      <p className="text-xs text-muted-foreground">
-                        Passing score: <span className="font-medium text-foreground">{passingScore}%</span>
+                    {quizTimeLeftSeconds !== null && quizTimeLeftSeconds <= 0 && (
+                      <p className="text-sm text-destructive">
+                        Time is up. Your quiz has been submitted.
                       </p>
-                    )} */}
-                    {questions.map((q, qi) => (
+                    )}
+                    {quizQuestions.map((q, qi) => (
                       <Card key={qi} className="overflow-hidden">
                         <CardContent className="pt-5">
                           <p className="font-semibold mb-4 leading-snug">
@@ -295,6 +443,7 @@ export default function LessonPage() {
                                     name={`q-${qi}`}
                                     checked={selected}
                                     onChange={() => setAnswers((prev) => ({ ...prev, [qi]: oi }))}
+                                    disabled={submitting || (quizTimeLeftSeconds !== null && quizTimeLeftSeconds <= 0)}
                                     className="sr-only"
                                   />
                                   <span className="text-sm">{opt}</span>
@@ -306,8 +455,14 @@ export default function LessonPage() {
                       </Card>
                     ))}
                     <Button
-                      onClick={handleQuizSubmit}
-                      disabled={submitting || questions.length !== Object.keys(answers).length}
+                      onClick={() => {
+                        void handleQuizSubmit(false);
+                      }}
+                      disabled={
+                        submitting ||
+                        (quizTimeLeftSeconds !== null && quizTimeLeftSeconds <= 0) ||
+                        quizQuestions.length !== Object.keys(answers).length
+                      }
                       className="w-full sm:w-auto"
                     >
                       {submitting ? 'Submitting…' : 'Submit Quiz'}
@@ -334,7 +489,7 @@ export default function LessonPage() {
                   <div>
                     <label className="text-sm font-medium mb-1.5 block">Your response</label>
                     <textarea
-                      className="w-full rounded-xl border bg-background p-3.5 text-sm min-h-[160px] focus:outline-none focus:ring-2 focus:ring-primary resize-none"
+                      className="w-full rounded-xl border bg-background p-3.5 text-sm min-h-40 focus:outline-none focus:ring-2 focus:ring-primary resize-none"
                       placeholder="Type your response here…"
                       value={assignmentText}
                       onChange={(e) => setAssignmentText(e.target.value)}
