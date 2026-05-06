@@ -1,16 +1,18 @@
 import { useState, type FormEvent } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { ArrowLeft, CircleHelp, FileText, Send, Sparkles, Tag } from 'lucide-react';
+import { ArrowLeft, CircleHelp, Loader2, Send, Tag } from 'lucide-react';
 import { Button, buttonVariants } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
-import { Separator } from '@/components/ui/separator';
 import { hotTags, type CommunityQuestionDraft } from '@/lib/community';
+import { createCommunityQuestion } from '@/lib/api/lms';
+import { useAuth } from '@/hooks/useAuth';
 
 const audienceOptions = ['All healthcare teams', 'Operations', 'Clinical teams', 'Biomedical teams'];
 
 export default function AskQuestionPage() {
   const navigate = useNavigate();
+  const { user } = useAuth();
   const [title, setTitle] = useState('How should we structure cold-chain incident handoffs across shift changes?');
   const [summary, setSummary] = useState(
     'We want one operational log that QA can review without forcing dispatchers to rewrite the same incident details.',
@@ -24,15 +26,21 @@ export default function AskQuestionPage() {
   const [tagsInput, setTagsInput] = useState('operations, cold-chain, compliance');
   const [audience, setAudience] = useState(audienceOptions[1]);
   const [error, setError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
 
   const draftTags = tagsInput
     .split(',')
     .map((tag) => tag.trim())
     .filter(Boolean);
 
-  function handlePreviewSubmit(event: FormEvent<HTMLFormElement>) {
+  async function handleQuestionSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError(null);
+
+    if (!user?.id) {
+      setError('Your account id is missing. Please sign in again before posting a question.');
+      return;
+    }
 
     if (!title.trim()) {
       setError('Add a clear title so other teams know what you need help with.');
@@ -40,7 +48,7 @@ export default function AskQuestionPage() {
     }
 
     if (!details.trim()) {
-      setError('Describe the situation before previewing the question.');
+      setError('Describe the situation before posting the question.');
       return;
     }
 
@@ -58,9 +66,28 @@ export default function AskQuestionPage() {
       audience,
     };
 
-    navigate('/community/thread/preview', {
-      state: { draft },
-    });
+    setSubmitting(true);
+    try {
+      const createdQuestion = await createCommunityQuestion({
+        author_id: Number(user.id) || user.id,
+        title: draft.title,
+        summary: draft.summary,
+        details: draft.details,
+        what_tried: draft.whatTried,
+        tags: draft.tags,
+        audience: draft.audience,
+      });
+
+      navigate(`/community/thread/${createdQuestion.id}`, {
+        state: {
+          justCreated: true,
+        },
+      });
+    } catch (submissionError) {
+      setError((submissionError as Error).message);
+    } finally {
+      setSubmitting(false);
+    }
   }
 
   return (
@@ -91,14 +118,13 @@ export default function AskQuestionPage() {
                   Ask a practical question your peers can answer.
                 </h1>
                 <p className="mt-3 max-w-2xl text-sm leading-6 text-muted-foreground sm:text-base">
-                  This prototype shows the question fields, submission flow, and resulting thread layout so the
-                  backend team can see exactly what the discussion API needs to support.
+                  This form posts to the live community question endpoint and opens the new thread after creation.
                 </p>
               </div>
 
               <div className="rounded-2xl border bg-background/80 px-4 py-3 text-sm shadow-sm">
-                <p className="font-medium text-foreground">Prototype flow</p>
-                <p className="mt-1 text-muted-foreground">Submit opens a thread preview instead of calling an API.</p>
+                <p className="font-medium text-foreground">Connected flow</p>
+                <p className="mt-1 text-muted-foreground">Submit posts to the API and opens the new thread view.</p>
               </div>
             </CardContent>
           </Card>
@@ -111,7 +137,7 @@ export default function AskQuestionPage() {
               </CardDescription>
             </CardHeader>
             <CardContent>
-              <form className="space-y-5" onSubmit={handlePreviewSubmit}>
+              <form className="space-y-5" onSubmit={handleQuestionSubmit}>
                 <div className="space-y-1.5">
                   <label htmlFor="question-title" className="text-sm font-medium">
                     Title
@@ -205,9 +231,18 @@ export default function AskQuestionPage() {
                 {error && <p className="text-sm text-destructive">{error}</p>}
 
                 <div className="flex flex-wrap items-center gap-3">
-                  <Button type="submit" size="lg">
-                    <Send className="h-4 w-4" />
-                    Preview thread
+                  <Button type="submit" size="lg" disabled={submitting}>
+                    {submitting ? (
+                      <>
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                        Posting question…
+                      </>
+                    ) : (
+                      <>
+                        <Send className="h-4 w-4" />
+                        Post question
+                      </>
+                    )}
                   </Button>
                   <Link to="/community" className={buttonVariants({ size: 'lg', variant: 'outline' })}>
                     Cancel
@@ -222,95 +257,25 @@ export default function AskQuestionPage() {
           <Card className="shadow-sm">
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
-                <Sparkles className="h-4 w-4 text-primary" />
-                Live preview
+                <Tag className="h-4 w-4 text-primary" />
+                Suggested tags
               </CardTitle>
-              <CardDescription>What the draft will look like in the thread view.</CardDescription>
+              <CardDescription>Quick ways to classify the question for the right audience.</CardDescription>
             </CardHeader>
-            <CardContent className="space-y-4">
-              <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">Title</p>
-                <p className="mt-2 text-base font-semibold text-foreground">{title || 'Untitled question'}</p>
-              </div>
-              <Separator />
-              <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">Summary</p>
-                <p className="mt-2 text-sm leading-6 text-muted-foreground">
-                  {summary || 'Add a short summary so the community feed has a useful excerpt.'}
-                </p>
-              </div>
-              <Separator />
-              <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">Tags</p>
-                <div className="mt-3 flex flex-wrap gap-2">
-                  {draftTags.length > 0 ? (
-                    draftTags.map((tag) => (
-                      <span
-                        key={tag}
-                        className="inline-flex items-center gap-1 rounded-full bg-accent px-3 py-1 text-xs font-medium text-accent-foreground"
-                      >
-                        <Tag className="h-3.5 w-3.5" />
-                        {tag}
-                      </span>
-                    ))
-                  ) : (
-                    <p className="text-sm text-muted-foreground">Add one or more tags.</p>
-                  )}
-                </div>
-              </div>
-              <Separator />
-              <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">Audience</p>
-                <p className="mt-2 text-sm text-foreground">{audience}</p>
-              </div>
-            </CardContent>
-          </Card>
-
-          <Card className="shadow-sm">
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <FileText className="h-4 w-4 text-primary" />
-                Backend handoff
-              </CardTitle>
-              <CardDescription>Useful endpoints and payload fields to support this UI.</CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4 text-sm text-muted-foreground">
-              <div>
-                <p className="font-medium text-foreground">Likely endpoints</p>
-                <p className="mt-2">POST /community/questions</p>
-                <p>GET /community/questions</p>
-                <p>GET /community/questions/:id</p>
-                <p>POST /community/questions/:id/answers</p>
-              </div>
-              <Separator />
-              <div>
-                <p className="font-medium text-foreground">Question payload</p>
-                <p className="mt-2">title</p>
-                <p>summary</p>
-                <p>details</p>
-                <p>what_tried</p>
-                <p>tags[]</p>
-                <p>audience</p>
-              </div>
-              <Separator />
-              <div>
-                <p className="font-medium text-foreground">Suggested starter tags</p>
-                <div className="mt-3 flex flex-wrap gap-2">
-                  {hotTags.map((tag) => (
-                    <button
-                      key={tag}
-                      type="button"
-                      onClick={() => {
-                        if (draftTags.includes(tag)) return;
-                        setTagsInput((prev) => (prev.trim() ? `${prev}, ${tag}` : tag));
-                      }}
-                      className="rounded-full border px-3 py-1 text-xs font-medium text-foreground transition-colors hover:bg-muted"
-                    >
-                      {tag}
-                    </button>
-                  ))}
-                </div>
-              </div>
+            <CardContent className="flex flex-wrap gap-2">
+              {hotTags.map((tag) => (
+                <button
+                  key={tag}
+                  type="button"
+                  onClick={() => {
+                    if (draftTags.includes(tag)) return;
+                    setTagsInput((prev) => (prev.trim() ? `${prev}, ${tag}` : tag));
+                  }}
+                  className="rounded-full border px-3 py-1 text-xs font-medium text-foreground transition-colors hover:bg-muted"
+                >
+                  {tag}
+                </button>
+              ))}
             </CardContent>
           </Card>
         </aside>

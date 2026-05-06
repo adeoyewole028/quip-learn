@@ -42,6 +42,21 @@ export interface ChangePasswordPayload {
   new_password: string;
 }
 
+export interface CommunityQuestionPayload {
+  author_id: number | string;
+  title: string;
+  summary: string;
+  details: string;
+  what_tried: string;
+  tags: string[];
+  audience: string;
+}
+
+export interface CommunityAnswerPayload {
+  author_id: number | string;
+  body: string;
+}
+
 export interface Module {
   id: string;
   course_id: string;

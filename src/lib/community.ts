@@ -1,5 +1,6 @@
 export interface CommunityQuestionSummary {
   id: number;
+  authorId?: number | string;
   title: string;
   excerpt: string;
   tags: string[];
@@ -15,6 +16,7 @@ export interface CommunityQuestionSummary {
 
 export interface CommunityAnswer {
   id: number;
+  authorId?: number | string;
   author: string;
   role: string;
   posted: string;
@@ -25,6 +27,7 @@ export interface CommunityAnswer {
 
 export interface CommunityThreadDetail {
   id: number;
+  authorId?: number | string;
   title: string;
   excerpt: string;
   body: string[];
@@ -40,6 +43,7 @@ export interface CommunityThreadDetail {
   trending?: boolean;
   answers: CommunityAnswer[];
   relatedQuestionIds: number[];
+  relatedQuestions?: CommunityQuestionSummary[];
 }
 
 export interface CommunityQuestionDraft {

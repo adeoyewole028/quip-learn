@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 import { Link, useLocation, useParams } from 'react-router-dom';
 import {
   ArrowLeft,
@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   Clock3,
   Eye,
+  Loader2,
   MessageSquareMore,
   Send,
   Share2,
@@ -13,71 +14,145 @@ import {
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import {
-  communityQuestions,
-  getCommunityThreadById,
-  getRelatedCommunityQuestions,
-  type CommunityQuestionDraft,
-  type CommunityThreadDetail,
-} from '@/lib/community';
+import { acceptCommunityAnswer, createCommunityAnswer, getCommunityQuestionById } from '@/lib/api/lms';
+import { type CommunityThreadDetail } from '@/lib/community';
 import { useAuth } from '@/hooks/useAuth';
-
-function buildPreviewThread(draft: CommunityQuestionDraft, authorName: string): CommunityThreadDetail {
-  const summaryText = draft.summary.trim();
-  const detailsText = draft.details.trim();
-  const whatTriedText = draft.whatTried.trim();
-
-  return {
-    id: 0,
-    title: draft.title || 'Untitled question',
-    excerpt: summaryText || detailsText.slice(0, 180),
-    body: [detailsText, whatTriedText && `What I have tried: ${whatTriedText}`].filter(Boolean),
-    tags: draft.tags,
-    author: authorName,
-    role: draft.audience,
-    asked: 'Just now',
-    updated: 'Preview mode',
-    votes: 0,
-    answerCount: 0,
-    views: 1,
-    answers: [],
-    relatedQuestionIds: [],
-  };
-}
 
 export default function CommunityThreadPage() {
   const { questionId } = useParams<{ questionId: string }>();
   const location = useLocation();
   const { user } = useAuth();
   const [answerDraft, setAnswerDraft] = useState('');
+  const [answerError, setAnswerError] = useState<string | null>(null);
   const [answerNotice, setAnswerNotice] = useState<string | null>(null);
+  const [answerSubmitting, setAnswerSubmitting] = useState(false);
+  const [acceptingAnswerId, setAcceptingAnswerId] = useState<number | null>(null);
+  const [fetchedThread, setFetchedThread] = useState<CommunityThreadDetail | null>(null);
+  const [threadError, setThreadError] = useState<{ questionId: number; message: string } | null>(null);
 
-  const draft = (location.state as { draft?: CommunityQuestionDraft } | null)?.draft;
-  const previewMode = questionId === 'preview' && Boolean(draft);
-  const authorName = user?.name || user?.first_name || 'You';
+  const locationState = location.state as { justCreated?: boolean } | null;
+  const justCreated = Boolean(locationState?.justCreated);
+  const currentUserId = user?.id ? String(user.id) : null;
+  const parsedQuestionId = questionId ? Number(questionId) : null;
+  const numericQuestionId = parsedQuestionId !== null && Number.isFinite(parsedQuestionId) ? parsedQuestionId : null;
+  const thread = numericQuestionId !== null && fetchedThread?.id === numericQuestionId ? fetchedThread : null;
+  const activeThreadError =
+    numericQuestionId === null
+      ? 'Invalid question id.'
+      : threadError?.questionId === numericQuestionId
+        ? threadError.message
+        : null;
+  const showLoadingThread = numericQuestionId !== null && !thread && !activeThreadError;
+  const canAcceptAnswers = Boolean(
+    currentUserId &&
+    thread?.authorId != null &&
+    String(thread.authorId) === currentUserId &&
+    !thread.hasAcceptedAnswer,
+  );
 
-  const thread = previewMode
-    ? buildPreviewThread(draft!, authorName)
-    : questionId
-      ? getCommunityThreadById(Number(questionId))
-      : undefined;
+  const relatedQuestions = thread?.relatedQuestions ?? [];
 
-  const relatedQuestions = previewMode
-    ? communityQuestions.slice(0, 3)
-    : thread
-      ? getRelatedCommunityQuestions(thread.relatedQuestionIds)
-      : [];
+  async function refreshThread(questionIdToRefresh: number): Promise<void> {
+    const liveQuestion = await getCommunityQuestionById(questionIdToRefresh);
+    setFetchedThread(liveQuestion);
+    setThreadError(null);
+  }
 
-  function handleAnswerPreview(event: FormEvent<HTMLFormElement>) {
+  useEffect(() => {
+    if (numericQuestionId === null) return;
+
+    let cancelled = false;
+
+    getCommunityQuestionById(numericQuestionId)
+      .then((liveQuestion) => {
+        if (cancelled) return;
+        setFetchedThread(liveQuestion);
+        setThreadError(null);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setThreadError({
+          questionId: numericQuestionId,
+          message: (error as Error).message,
+        });
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [numericQuestionId]);
+
+  async function handleAnswerSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    setAnswerError(null);
+    setAnswerNotice(null);
 
     if (!answerDraft.trim()) {
-      setAnswerNotice('Write an answer first so the backend team can see the full composer state.');
+      setAnswerError('Write an answer before submitting.');
       return;
     }
 
-    setAnswerNotice(
-      'Prototype only: this composer is ready for a POST /community/questions/:id/answers endpoint.',
+    if (numericQuestionId === null || !thread) {
+      setAnswerError('This question could not be loaded.');
+      return;
+    }
+
+    if (!user?.id) {
+      setAnswerError('Your account id is missing. Please sign in again before posting an answer.');
+      return;
+    }
+
+    setAnswerSubmitting(true);
+    try {
+      await createCommunityAnswer(
+        numericQuestionId,
+        {
+          author_id: Number(user.id) || user.id,
+          body: answerDraft.trim(),
+        },
+      );
+
+      setAnswerDraft('');
+      await refreshThread(numericQuestionId);
+      setAnswerNotice('Answer posted successfully.');
+    } catch (error) {
+      setAnswerError((error as Error).message);
+    } finally {
+      setAnswerSubmitting(false);
+    }
+  }
+
+  async function handleAcceptAnswer(answerId: number) {
+    if (numericQuestionId === null || !thread) {
+      setAnswerError('This question could not be loaded.');
+      return;
+    }
+
+    setAnswerError(null);
+    setAnswerNotice(null);
+    setAcceptingAnswerId(answerId);
+
+    try {
+      const message = await acceptCommunityAnswer(answerId);
+      await refreshThread(numericQuestionId);
+      setAnswerNotice(message);
+    } catch (error) {
+      setAnswerError((error as Error).message);
+    } finally {
+      setAcceptingAnswerId(null);
+    }
+  }
+
+  if (showLoadingThread) {
+    return (
+      <div className="mx-auto max-w-3xl px-4 py-12 sm:px-6 lg:px-8">
+        <Card className="shadow-sm">
+          <CardContent className="flex items-center justify-center gap-3 px-6 py-10 text-sm text-muted-foreground">
+            <Loader2 className="h-4 w-4 animate-spin" />
+            Loading question details…
+          </CardContent>
+        </Card>
+      </div>
     );
   }
 
@@ -88,7 +163,7 @@ export default function CommunityThreadPage() {
           <CardContent className="space-y-4 px-6 py-10">
             <p className="text-lg font-semibold text-foreground">Thread not found</p>
             <p className="text-sm text-muted-foreground">
-              The requested question does not exist in the prototype data set.
+              {activeThreadError || 'The requested question could not be loaded.'}
             </p>
             <div className="flex justify-center">
               <Link to="/community">
@@ -111,23 +186,16 @@ export default function CommunityThreadPage() {
           <ArrowLeft className="h-4 w-4" />
           Back to community
         </Link>
-        {previewMode && (
-          <span className="rounded-full border border-primary/20 bg-primary/10 px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em] text-primary">
-            Preview thread
-          </span>
-        )}
       </div>
 
       <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_21rem]">
         <section className="space-y-6">
-          {previewMode && (
+          {justCreated && (
             <Card className="border-primary/15 bg-linear-to-r from-primary/8 to-accent/50 shadow-sm">
               <CardContent className="px-6 py-5">
-                <p className="text-sm font-medium text-foreground">
-                  This thread is rendered from the Ask Question form and can be used for backend screenshots.
-                </p>
+                <p className="text-sm font-medium text-foreground">Question posted successfully.</p>
                 <p className="mt-2 text-sm text-muted-foreground">
-                  A real implementation would persist the question first, then return the created thread with its ID.
+                  The question has been created and this page will keep itself in sync with the live detail endpoint.
                 </p>
               </CardContent>
             </Card>
@@ -174,7 +242,7 @@ export default function CommunityThreadPage() {
                   </div>
                   <div className="rounded-2xl border bg-muted/40 px-3 py-2 text-center md:w-full">
                     <p className="text-xl font-semibold text-foreground">{thread.answerCount}</p>
-                    <p className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Answers</p>
+                    <p className="text-[8px] uppercase tracking-[0.18em] text-muted-foreground">Answers</p>
                   </div>
                 </div>
 
@@ -253,10 +321,34 @@ export default function CommunityThreadPage() {
                         </div>
 
                         <div className="mt-5 flex flex-wrap items-center justify-between gap-3 rounded-2xl bg-muted/20 px-4 py-3 text-xs text-muted-foreground">
-                          <span className="inline-flex items-center gap-1.5">
-                            <ThumbsUp className="h-3.5 w-3.5" />
-                            {answer.votes} people found this helpful
-                          </span>
+                          <div className="flex flex-wrap items-center gap-3">
+                            <span className="inline-flex items-center gap-1.5">
+                              <ThumbsUp className="h-3.5 w-3.5" />
+                              {answer.votes} people found this helpful
+                            </span>
+                            {canAcceptAnswers && !answer.accepted && (
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                onClick={() => handleAcceptAnswer(answer.id)}
+                                disabled={acceptingAnswerId === answer.id}
+                                className="h-8 cursor-pointer rounded-full border-primary/20 bg-background px-3 text-xs font-semibold text-primary hover:bg-primary/5 hover:text-primary disabled:cursor-not-allowed disabled:opacity-60"
+                              >
+                                {acceptingAnswerId === answer.id ? (
+                                  <>
+                                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                    Accepting…
+                                  </>
+                                ) : (
+                                  <>
+                                    <CheckCircle2 className="h-3.5 w-3.5" />
+                                    Accept answer
+                                  </>
+                                )}
+                              </Button>
+                            )}
+                          </div>
                           <span>
                             <span className="font-medium text-foreground">{answer.author}</span>
                             {' '}· {answer.role} · answered {answer.posted}
@@ -281,21 +373,32 @@ export default function CommunityThreadPage() {
             <CardHeader>
               <CardTitle>Your answer</CardTitle>
               <CardDescription>
-                This composer shows the layout for posting a reply inside an existing thread.
+                Post a reply directly into this discussion thread.
               </CardDescription>
             </CardHeader>
             <CardContent>
-              <form className="space-y-4" onSubmit={handleAnswerPreview}>
+              <form className="space-y-4" onSubmit={handleAnswerSubmit}>
                 <textarea
                   value={answerDraft}
                   onChange={(event) => setAnswerDraft(event.target.value)}
                   className="min-h-40 w-full rounded-xl border bg-background px-3 py-3 text-sm leading-6 outline-none transition-colors focus:border-ring focus:ring-3 focus:ring-ring/20"
                   placeholder="Explain your answer, reference your experience, and include any caveats."
+                  disabled={answerSubmitting}
                 />
+                {answerError && <p className="text-sm text-destructive">{answerError}</p>}
                 {answerNotice && <p className="text-sm text-primary">{answerNotice}</p>}
-                <Button type="submit">
-                  <Send className="h-4 w-4" />
-                  Preview answer action
+                <Button type="submit" disabled={answerSubmitting}>
+                  {answerSubmitting ? (
+                    <>
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                      Posting answer…
+                    </>
+                  ) : (
+                    <>
+                      <Send className="h-4 w-4" />
+                      Post answer
+                    </>
+                  )}
                 </Button>
               </form>
             </CardContent>
@@ -316,43 +419,31 @@ export default function CommunityThreadPage() {
                 <span>Accepted answer</span>
                 <span className="font-medium text-foreground">{thread.hasAcceptedAnswer ? 'Yes' : 'Not yet'}</span>
               </div>
-              <div className="flex items-center justify-between gap-3">
-                <span>Preview mode</span>
-                <span className="font-medium text-foreground">{previewMode ? 'On' : 'Off'}</span>
-              </div>
             </CardContent>
           </Card>
 
           <Card className="shadow-sm">
             <CardHeader>
               <CardTitle>Related discussions</CardTitle>
-              <CardDescription>How linked threads could surface in the right rail.</CardDescription>
+              <CardDescription>Linked threads from the same topic.</CardDescription>
             </CardHeader>
             <CardContent className="space-y-3">
-              {relatedQuestions.map((question) => (
-                <Link
-                  key={question.id}
-                  to={`/community/thread/${question.id}`}
-                  className="block rounded-2xl border p-4 transition-colors hover:bg-muted/40"
-                >
-                  <p className="text-sm font-medium leading-6 text-foreground">{question.title}</p>
-                  <p className="mt-2 text-xs text-muted-foreground">
-                    {question.answers} answers · {question.views} views
-                  </p>
-                </Link>
-              ))}
-            </CardContent>
-          </Card>
-
-          <Card className="shadow-sm">
-            <CardHeader>
-              <CardTitle>Backend support</CardTitle>
-              <CardDescription>Useful payloads for the thread and answer views.</CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-3 text-sm text-muted-foreground">
-              <p>GET /community/questions/:id should return the question, answers, counts, and related threads.</p>
-              <p>POST /community/questions/:id/answers should accept the answer body and return the created answer.</p>
-              <p>The response should also include accepted-answer state and author metadata for every post.</p>
+              {relatedQuestions.length > 0 ? (
+                relatedQuestions.map((question) => (
+                  <Link
+                    key={question.id}
+                    to={`/community/thread/${question.id}`}
+                    className="block rounded-2xl border p-4 transition-colors hover:bg-muted/40"
+                  >
+                    <p className="text-sm font-medium leading-6 text-foreground">{question.title}</p>
+                    <p className="mt-2 text-xs text-muted-foreground">
+                      {question.answers} answers · {question.views} views
+                    </p>
+                  </Link>
+                ))
+              ) : (
+                <p className="text-sm text-muted-foreground">No related discussions yet.</p>
+              )}
             </CardContent>
           </Card>
         </aside>

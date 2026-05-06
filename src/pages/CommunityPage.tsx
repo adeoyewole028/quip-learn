@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   ArrowUpRight,
@@ -13,15 +13,42 @@ import {
 import { buttonVariants } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
-import { communityQuestions, hotTags } from '@/lib/community';
+import { hotTags, type CommunityQuestionSummary } from '@/lib/community';
+import { getCommunityQuestions } from '@/lib/api/lms';
 
 type CommunityFilter = 'Newest' | 'Unanswered' | 'Trending';
 
 export default function CommunityPage() {
   const [query, setQuery] = useState('');
   const [activeFilter, setActiveFilter] = useState<CommunityFilter>('Newest');
+  const [questions, setQuestions] = useState<CommunityQuestionSummary[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [apiError, setApiError] = useState<string | null>(null);
 
-  const filteredQuestions = communityQuestions.filter((question) => {
+  useEffect(() => {
+    let cancelled = false;
+
+    getCommunityQuestions()
+      .then((liveQuestions) => {
+        if (cancelled) return;
+        setApiError(null);
+        setQuestions(liveQuestions);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setApiError((error as Error).message);
+      })
+      .finally(() => {
+        if (cancelled) return;
+        setLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const filteredQuestions = questions.filter((question) => {
     const normalizedQuery = query.trim().toLowerCase();
     const matchesQuery =
       normalizedQuery.length === 0 ||
@@ -39,6 +66,14 @@ export default function CommunityPage() {
     <div className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
       <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_20rem]">
         <section className="space-y-6">
+          {apiError && (
+            <Card className="border-destructive/20 bg-destructive/5 shadow-sm">
+              <CardContent className="px-6 py-4 text-sm text-destructive">
+                {apiError}
+              </CardContent>
+            </Card>
+          )}
+
           <Card className="overflow-hidden border-primary/15 bg-linear-to-br from-primary/8 via-background to-accent/70 shadow-sm">
             <CardContent className="grid gap-5 px-6 py-6 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">
               <div>
@@ -59,9 +94,6 @@ export default function CommunityPage() {
                 <Link to="/community/ask" className={buttonVariants({ size: 'lg' })}>
                   Ask a question
                 </Link>
-                {/* <p className="text-xs text-muted-foreground">
-                  Posting opens once the discussion API is connected.
-                </p> */}
               </div>
             </CardContent>
           </Card>
@@ -98,7 +130,7 @@ export default function CommunityPage() {
               </div>
 
               <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                <span>{filteredQuestions.length} questions</span>
+                <span>{loading ? 'Syncing community…' : `${filteredQuestions.length} questions`}</span>
                 <span className="h-1 w-1 rounded-full bg-border" />
                 <span>Sorted like a Q&A board</span>
                 <span className="h-1 w-1 rounded-full bg-border" />
