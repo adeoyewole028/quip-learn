@@ -137,6 +137,7 @@ export interface SubmitAssignmentPayload {
 
 export interface CompleteLessonPayload {
   lessonId: string;
+  user_id: string;
 }
 
 export interface ApiResponse<T> {

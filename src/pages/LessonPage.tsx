@@ -179,9 +179,14 @@ export default function LessonPage() {
 
   async function handleMarkComplete() {
     if (!id) return;
+    if (!user?.id) {
+      setError('You must be logged in to complete this lesson.');
+      return;
+    }
+
     setSubmitting(true);
     try {
-      await completeLesson({ lessonId: id });
+      await completeLesson({ lessonId: id, user_id: user.id });
       setDone(true);
     } catch (err) {
       setError((err as Error).message);

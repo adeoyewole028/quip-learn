@@ -836,9 +836,39 @@ export function submitAssignmentFile(formData: FormData): Promise<unknown> {
 }
 
 /** POST /lms/complete-lesson */
-export function completeLesson(payload: CompleteLessonPayload): Promise<unknown> {
-  return request('/lms/complete-lesson', {
+export async function completeLesson(payload: CompleteLessonPayload): Promise<string> {
+  const res = await fetch(`${BASE_URL}/lms/complete-lesson`, {
     method: 'POST',
-    body: JSON.stringify(payload),
+    credentials: 'include',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      user_id: payload.user_id,
+      lesson_id: payload.lessonId,
+    }),
   });
+
+  const text = await res.text().catch(() => '');
+
+  if (!res.ok) {
+    throw new Error(getApiMessage(text, res.statusText || 'Failed to complete lesson'));
+  }
+
+  const parsed = parseApiText(text);
+  const statusCode = Number(parsed?.res);
+
+  if (!Number.isNaN(statusCode) && statusCode === 0) {
+    throw new Error(getApiMessage(text, 'Failed to complete lesson'));
+  }
+
+  if (typeof parsed?.message === 'string' && parsed.message.trim()) {
+    return parsed.message.trim();
+  }
+
+  if (typeof parsed?.data === 'string' && parsed.data.trim()) {
+    return parsed.data.trim();
+  }
+
+  return text.trim() || 'Lesson completed successfully.';
 }
