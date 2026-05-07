@@ -1,7 +1,7 @@
 
 import { useEffect, useEffectEvent, useRef, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { getLesson, completeLesson, submitQuiz, submitAssignmentFile } from '@/lib/api/lms';
+import { getLesson, getUserProgress, completeLesson, submitQuiz, submitAssignmentFile } from '@/lib/api/lms';
 import type { Lesson, RawQuizQuestion, TextLessonContent, VideoLessonContent, QuizLessonContent, AssignmentLessonContent, VideoProvider } from '@/types/lms';
 import { useAuth } from '@/hooks/useAuth';
 
@@ -128,13 +128,20 @@ export default function LessonPage() {
 
     let cancelled = false;
 
-    getLesson(id)
-      .then((nextLesson) => {
+    Promise.all([
+      getLesson(id),
+      user?.id ? getUserProgress(user.id) : Promise.resolve(null),
+    ])
+      .then(([nextLesson, progress]) => {
         if (cancelled) return;
-        setLesson(nextLesson);
+        const completedFromProgress = progress?.completedLessonIds.includes(nextLesson.id) ?? false;
+        setLesson({
+          ...nextLesson,
+          completed: nextLesson.completed || completedFromProgress,
+        });
         setAnswers({});
         setQuizResult(null);
-        setDone(false);
+        setDone(nextLesson.completed || completedFromProgress);
         setQuizTimeLeftSeconds(
           nextLesson.type === 'quiz' ? parseDurationToSeconds(nextLesson.duration) : null,
         );
@@ -152,7 +159,7 @@ export default function LessonPage() {
     return () => {
       cancelled = true;
     };
-  }, [id]);
+  }, [id, user?.id]);
 
   useEffect(() => {
     if (
@@ -187,6 +194,7 @@ export default function LessonPage() {
     setSubmitting(true);
     try {
       await completeLesson({ lessonId: id, user_id: user.id });
+      setLesson((currentLesson) => (currentLesson ? { ...currentLesson, completed: true } : currentLesson));
       setDone(true);
     } catch (err) {
       setError((err as Error).message);
@@ -237,6 +245,7 @@ export default function LessonPage() {
         score: percentageScore,
         answers: normalizedAnswers,
       });
+      setLesson((currentLesson) => (currentLesson ? { ...currentLesson, completed: true } : currentLesson));
 
       // Set result AFTER successful submit so timedOut is always accurate.
       setQuizResult({
@@ -273,6 +282,7 @@ export default function LessonPage() {
       if (assignmentText) fd.append('text', assignmentText);
       if (assignmentFile) fd.append('file', assignmentFile);
       await submitAssignmentFile(fd);
+      setLesson((currentLesson) => (currentLesson ? { ...currentLesson, completed: true } : currentLesson));
       setDone(true);
     } catch (err) {
       setError((err as Error).message);

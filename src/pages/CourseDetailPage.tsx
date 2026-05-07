@@ -1,11 +1,12 @@
 ﻿import { useEffect, useState } from 'react';
 import { useParams, useNavigate, useLocation, Link } from 'react-router-dom';
-import { getCourse } from '@/lib/api/lms';
-import type { Course, Module, Lesson } from '@/types/lms';
+import { getCourse, getUserProgress } from '@/lib/api/lms';
+import type { Course, Module, Lesson, UserProgress } from '@/types/lms';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Progress } from '@/components/ui/progress';
+import { useAuth } from '@/hooks/useAuth';
 import {
   ChevronLeft, CheckCircle2, PlayCircle, FileText, HelpCircle,
   PenLine, BookOpen, AlertCircle, ChevronRight, Layers3, X,
@@ -29,25 +30,52 @@ export default function CourseDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const location = useLocation();
+  const { user } = useAuth();
   // Course summary passed as route state from CoursesPage
   const course = (location.state as { course?: Course } | null)?.course ?? null;
 
   const [modules, setModules] = useState<Module[]>([]);
+  const [userProgress, setUserProgress] = useState<UserProgress | null>(null);
   const [selectedModule, setSelectedModule] = useState<Module | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const sortedModules = modules
-    .slice()
-    .sort((a, b) => Number(a.order_index) - Number(b.order_index));
-
   useEffect(() => {
     if (!id) return;
-    getCourse(id)
-      .then(setModules)
-      .catch((err: Error) => setError(err.message))
-      .finally(() => setLoading(false));
-  }, [id]);
+    const courseId = id;
+
+    let cancelled = false;
+
+    async function loadCourseDetail() {
+      setLoading(true);
+      setError(null);
+
+      try {
+        const [nextModules, nextProgress] = await Promise.all([
+          getCourse(courseId),
+          user?.id ? getUserProgress(user.id) : Promise.resolve<UserProgress | null>(null),
+        ]);
+
+        if (cancelled) return;
+
+        setModules(nextModules);
+        setUserProgress(nextProgress);
+      } catch (err) {
+        if (cancelled) return;
+        setError((err as Error).message);
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      }
+    }
+
+    void loadCourseDetail();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [id, user?.id]);
 
   if (error) {
     return (
@@ -58,9 +86,24 @@ export default function CourseDetailPage() {
     );
   }
 
-  const allLessons: Lesson[] = modules.flatMap((m) => m.lessons);
-  const completed = allLessons.filter((l) => l.completed).length;
-  const progress = allLessons.length ? Math.round((completed / allLessons.length) * 100) : 0;
+  const completedLessonIds = new Set(userProgress?.completedLessonIds ?? []);
+  const modulesWithProgress = modules.map((module) => ({
+    ...module,
+    lessons: module.lessons.map((lesson) => ({
+      ...lesson,
+      completed: lesson.completed || completedLessonIds.has(lesson.id),
+    })),
+  }));
+  const sortedModules = modulesWithProgress
+    .slice()
+    .sort((a, b) => Number(a.order_index) - Number(b.order_index));
+  const trackedCourseProgress = id ? userProgress?.courseProgress[id] : undefined;
+  const allLessons: Lesson[] = modulesWithProgress.flatMap((module) => module.lessons);
+  const completed = trackedCourseProgress?.completedLessons ?? allLessons.filter((lesson) => lesson.completed).length;
+  const totalLessons = trackedCourseProgress?.totalLessons ?? allLessons.length;
+  const progress =
+    trackedCourseProgress?.progressPercent ??
+    (totalLessons ? Math.round((completed / totalLessons) * 100) : 0);
 
   const selectedModuleLessons = selectedModule
     ? selectedModule.lessons
@@ -101,10 +144,10 @@ export default function CourseDetailPage() {
               )}
             </div>
             <p className="text-muted-foreground text-sm mb-4">{course.description}</p>
-            {!loading && allLessons.length > 0 && (
+            {!loading && totalLessons > 0 && (
               <div>
                 <div className="flex justify-between text-xs text-muted-foreground mb-1.5">
-                  <span>{completed} / {allLessons.length} lessons completed</span>
+                  <span>{completed} / {totalLessons} lessons completed</span>
                   <span className="font-medium text-primary">{progress}%</span>
                 </div>
                 <Progress value={progress} className="h-2" />
@@ -153,9 +196,9 @@ export default function CourseDetailPage() {
                           <span className="flex h-6 w-6 items-center justify-center rounded-full bg-primary/10 text-[11px] font-bold text-primary shrink-0">
                             {idx + 1}
                           </span>
-                          <span className="text-xs font-semibold uppercase tracking-[0.22em] text-muted-foreground">
+                          {/* <span className="text-xs font-semibold uppercase tracking-[0.22em] text-muted-foreground">
                             {module.title}
-                          </span>
+                          </span> */}
                         </div>
 
                         <div className="mt-4 flex items-start gap-3">
@@ -164,7 +207,7 @@ export default function CourseDetailPage() {
                           </span>
                           <div className="min-w-0">
                             <p className="text-lg font-semibold tracking-tight text-foreground transition-colors group-hover:text-primary">
-                              Lesson {idx + 1}
+                              {module.title}
                             </p>
                             <p className="mt-1 text-sm leading-6 text-muted-foreground">
                               {moduleLessons.length} learning item{moduleLessons.length === 1 ? '' : 's'} inside this stack.

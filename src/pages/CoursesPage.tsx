@@ -1,25 +1,54 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { getCourses } from '@/lib/api/lms';
-import type { Course } from '@/types/lms';
+import { getCourses, getUserProgress } from '@/lib/api/lms';
+import type { Course, UserProgress } from '@/types/lms';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Progress } from '@/components/ui/progress';
 import { BookOpen, ArrowRight, AlertCircle } from 'lucide-react';
+import { useAuth } from '@/hooks/useAuth';
 
 export default function CoursesPage() {
   const [courses, setCourses] = useState<Course[]>([]);
+  const [userProgress, setUserProgress] = useState<UserProgress | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const navigate = useNavigate();
+  const { user } = useAuth();
 
   useEffect(() => {
-    getCourses()
-      .then(setCourses)
-      .catch((err: Error) => setError(err.message))
-      .finally(() => setLoading(false));
-  }, []);
+    let cancelled = false;
+
+    async function loadCourses() {
+      setLoading(true);
+      setError(null);
+
+      try {
+        const [nextCourses, nextProgress] = await Promise.all([
+          getCourses(),
+          user?.id ? getUserProgress(user.id) : Promise.resolve<UserProgress | null>(null),
+        ]);
+
+        if (cancelled) return;
+
+        setCourses(nextCourses);
+        setUserProgress(nextProgress);
+      } catch (err) {
+        if (cancelled) return;
+        setError((err as Error).message);
+      } finally {
+        if (cancelled) return;
+        setLoading(false);
+      }
+    }
+
+    void loadCourses();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [user?.id]);
 
   if (error) {
     return (
@@ -67,16 +96,28 @@ export default function CoursesPage() {
       ) : (
         <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
           {courses.map((course) => {
+            const trackedProgress = userProgress?.courseProgress[course.id];
+            const completedLessons = trackedProgress?.completedLessons ?? course.completedLessons;
+            const totalLessons = trackedProgress?.totalLessons ?? course.totalLessons;
             const progress =
-              course.totalLessons && course.completedLessons != null
-                ? Math.round((course.completedLessons / course.totalLessons) * 100)
-                : null;
+              trackedProgress?.progressPercent ??
+              (totalLessons && completedLessons != null
+                ? Math.round((completedLessons / totalLessons) * 100)
+                : null);
 
             return (
               <Card
                 key={course.id}
                 className="group cursor-pointer flex flex-col overflow-hidden border hover:border-primary/50 hover:shadow-lg transition-all duration-200"
-                onClick={() => navigate(`/courses/${course.id}`, { state: { course } })}
+                onClick={() => navigate(`/courses/${course.id}`, {
+                  state: {
+                    course: {
+                      ...course,
+                      completedLessons,
+                      totalLessons,
+                    },
+                  },
+                })}
               >
                 {/* Thumbnail or placeholder */}
                 {course.thumbnail_url ? (
@@ -112,7 +153,7 @@ export default function CoursesPage() {
                     <>
                       <div className="flex justify-between text-xs text-muted-foreground mb-1.5">
                         <span>
-                          {course.completedLessons} / {course.totalLessons} lessons
+                          {completedLessons ?? 0} / {totalLessons ?? 0} lessons
                         </span>
                         <span className="font-medium text-primary">{progress}%</span>
                       </div>

@@ -11,6 +11,8 @@ import type {
   SubmitQuizPayload,
   SubmitAssignmentPayload,
   CompleteLessonPayload,
+  UserProgress,
+  UserCourseProgress,
 } from '@/types/lms';
 import type { CommunityAnswer, CommunityQuestionSummary, CommunityThreadDetail } from '@/lib/community';
 
@@ -268,6 +270,109 @@ function extractRelatedQuestionIds(value: unknown): number[] {
       return toNumber(item);
     })
     .filter((questionId): questionId is number => typeof questionId === 'number');
+}
+
+function extractProgressRoot(value: unknown): unknown {
+  if (!isJsonRecord(value)) return value;
+
+  const candidates = [value.data, value.progress, value.user_progress, value.userProgress, value.result];
+
+  for (const candidate of candidates) {
+    if (candidate !== undefined) {
+      return candidate;
+    }
+  }
+
+  return value;
+}
+
+function collectProgressRecords(value: unknown, seen = new Set<unknown>()): JsonRecord[] {
+  if (value == null || seen.has(value)) return [];
+
+  if (Array.isArray(value)) {
+    seen.add(value);
+    return value.flatMap((item) => collectProgressRecords(item, seen));
+  }
+
+  if (!isJsonRecord(value)) return [];
+
+  seen.add(value);
+
+  const looksLikeProgressRecord =
+    value.course_id != null ||
+    value.courseId != null ||
+    value.lesson_id != null ||
+    value.lessonId != null ||
+    value.completed_lessons != null ||
+    value.completedLessons != null ||
+    value.total_lessons != null ||
+    value.totalLessons != null ||
+    value.progress != null ||
+    value.progress_percent != null ||
+    value.progressPercent != null;
+
+  const nestedValues = Object.values(value).flatMap((item) => collectProgressRecords(item, seen));
+
+  return looksLikeProgressRecord ? [value, ...nestedValues] : nestedValues;
+}
+
+function normalizeUserProgress(value: unknown): UserProgress {
+  const root = extractProgressRoot(value);
+  const records = collectProgressRecords(root);
+  const completedLessonIds = new Set<string>();
+  const courseProgress = new Map<string, UserCourseProgress>();
+
+  for (const record of records) {
+    const lessonId = toIdentifier(record.lesson_id ?? record.lessonId);
+    const courseId = toIdentifier(record.course_id ?? record.courseId ?? record.id);
+    const completed =
+      toBoolean(record.completed) ??
+      toBoolean(record.is_completed) ??
+      toBoolean(record.isCompleted) ??
+      toBoolean(record.done) ??
+      toBoolean(record.status);
+
+    if (lessonId !== undefined && completed !== false) {
+      completedLessonIds.add(String(lessonId));
+    }
+
+    if (courseId === undefined) {
+      continue;
+    }
+
+    const normalizedCourseId = String(courseId);
+    const previous = courseProgress.get(normalizedCourseId) ?? { courseId: normalizedCourseId };
+    const completedLessons =
+      toNumber(record.completed_lessons) ??
+      toNumber(record.completedLessons) ??
+      toNumber(record.completed_count) ??
+      toNumber(record.completedCount) ??
+      previous.completedLessons;
+    const totalLessons =
+      toNumber(record.total_lessons) ??
+      toNumber(record.totalLessons) ??
+      toNumber(record.lesson_count) ??
+      toNumber(record.lessonCount) ??
+      previous.totalLessons;
+    const progressPercent =
+      toNumber(record.progress_percent) ??
+      toNumber(record.progressPercent) ??
+      toNumber(record.progress) ??
+      toNumber(record.percentage) ??
+      previous.progressPercent;
+
+    courseProgress.set(normalizedCourseId, {
+      courseId: normalizedCourseId,
+      completedLessons,
+      totalLessons,
+      progressPercent,
+    });
+  }
+
+  return {
+    courseProgress: Object.fromEntries(courseProgress.entries()),
+    completedLessonIds: Array.from(completedLessonIds),
+  };
 }
 
 function normalizeCommunityQuestionSummary(
@@ -803,6 +908,30 @@ export function getCourse(id: string): Promise<Module[]> {
 /** GET /lms/lesson/{id} — lesson content */
 export function getLesson(id: string | number): Promise<Lesson> {
   return request<Lesson>(`/lms/lesson/${id}`);
+}
+
+/** POST /lms/user-progres/{userId} */
+export async function getUserProgress(userId: string | number): Promise<UserProgress> {
+  const res = await fetch(`${BASE_URL}/lms/user-progres/${userId}`, {
+    method: 'POST',
+    credentials: 'include',
+  });
+
+  const text = await res.text().catch(() => '');
+
+  if (!res.ok) {
+    throw new Error(getApiMessage(text, res.statusText || 'Failed to load user progress'));
+  }
+
+  const parsedJson = parseApiJson(text);
+  const parsedRecord = isJsonRecord(parsedJson) ? parsedJson : null;
+  const statusCode = Number(parsedRecord?.res);
+
+  if (!Number.isNaN(statusCode) && statusCode === 0) {
+    throw new Error(getApiMessage(text, 'Failed to load user progress'));
+  }
+
+  return normalizeUserProgress(parsedJson);
 }
 
 /** POST /lms/submit-quiz */

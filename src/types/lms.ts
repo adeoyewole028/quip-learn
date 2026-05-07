@@ -140,6 +140,18 @@ export interface CompleteLessonPayload {
   user_id: string;
 }
 
+export interface UserCourseProgress {
+  courseId: string;
+  completedLessons?: number;
+  totalLessons?: number;
+  progressPercent?: number;
+}
+
+export interface UserProgress {
+  courseProgress: Record<string, UserCourseProgress>;
+  completedLessonIds: string[];
+}
+
 export interface ApiResponse<T> {
   data: T;
   message?: string;
