@@ -26,7 +26,7 @@ export default function CoursesPage() {
 
       try {
         const [nextCourses, nextProgress] = await Promise.all([
-          getCourses(),
+          getCourses(user?.cohort ?? undefined),
           user?.id ? getUserProgress(user.id) : Promise.resolve<UserProgress | null>(null),
         ]);
 
@@ -38,8 +38,7 @@ export default function CoursesPage() {
         if (cancelled) return;
         setError((err as Error).message);
       } finally {
-        if (cancelled) return;
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
     }
 
@@ -48,7 +47,7 @@ export default function CoursesPage() {
     return () => {
       cancelled = true;
     };
-  }, [user?.id]);
+  }, [user?.id, user?.cohort]);
 
   if (error) {
     return (
