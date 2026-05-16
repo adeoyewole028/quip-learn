@@ -7,6 +7,8 @@ import type {
   ChangePasswordPayload,
   CommunityQuestionPayload,
   CommunityAnswerPayload,
+  UpdateCommunityQuestionPayload,
+  UpdateCommunityAnswerPayload,
   ApiEnvelope,
   SubmitQuizPayload,
   SubmitAssignmentPayload,
@@ -65,6 +67,29 @@ function toTrimmedString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
 }
 
+function getStoredUserCohort(): string | undefined {
+  if (typeof window === 'undefined') return undefined;
+
+  try {
+    const storedUser = window.localStorage.getItem('quip_user');
+    if (!storedUser) return undefined;
+
+    const parsedUser = JSON.parse(storedUser) as { cohort?: unknown };
+    return toTrimmedString(parsedUser.cohort);
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizeCohortValue(cohort?: string): string | undefined {
+  return toTrimmedString(cohort);
+}
+
+function buildCohortQuery(cohort?: string): string {
+  const resolvedCohort = normalizeCohortValue(cohort) ?? normalizeCohortValue(getStoredUserCohort());
+  return resolvedCohort ? `?cohort=${encodeURIComponent(resolvedCohort)}` : '';
+}
+
 function getCommunityAuthorName(record: JsonRecord): string | undefined {
   const firstName = toTrimmedString(record.author_first_name);
   const lastName = toTrimmedString(record.author_last_name);
@@ -97,6 +122,38 @@ function toBoolean(value: unknown): boolean | undefined {
     if (normalized === 'false' || normalized === '0' || normalized === 'no') return false;
   }
   return undefined;
+}
+
+function parseApprovalState(record: JsonRecord, fallback?: boolean): boolean | undefined {
+  const explicitApproval =
+    toBoolean(record.approved) ??
+    toBoolean(record.is_approved) ??
+    toBoolean(record.isApproved) ??
+    toBoolean(record.approved_flag) ??
+    toBoolean(record.is_visible);
+
+  if (explicitApproval !== undefined) {
+    return explicitApproval;
+  }
+
+  const moderationStatus =
+    toTrimmedString(record.moderation_status) ??
+    toTrimmedString(record.moderationStatus) ??
+    toTrimmedString(record.status);
+
+  if (!moderationStatus) {
+    return fallback;
+  }
+
+  const normalizedStatus = moderationStatus.toLowerCase();
+  if (['approved', 'published', 'active', 'visible'].includes(normalizedStatus)) {
+    return true;
+  }
+  if (['pending', 'queued', 'draft', 'rejected', 'removed', 'deleted', 'hidden'].includes(normalizedStatus)) {
+    return false;
+  }
+
+  return fallback;
 }
 
 function parseCommunityTags(value: unknown): string[] {
@@ -433,6 +490,7 @@ function normalizeCommunityQuestionSummary(
       toIdentifier(record.user_id) ??
       toIdentifier(record.owner_id) ??
       fallback?.authorId,
+    approved: parseApprovalState(record, fallback?.approved),
     title,
     excerpt,
     tags: tags.length > 0 ? tags : (fallback?.tags ?? []),
@@ -489,6 +547,7 @@ function normalizeCommunityAnswer(
       toIdentifier(record.user_id) ??
       toIdentifier(record.owner_id) ??
       fallback?.authorId,
+    approved: parseApprovalState(record, fallback?.approved),
     author:
       toTrimmedString(record.author_name) ??
       getCommunityAuthorName(record) ??
@@ -586,6 +645,7 @@ function normalizeCommunityThreadDetail(
       toIdentifier(record.user_id) ??
       toIdentifier(record.owner_id) ??
       fallback?.authorId,
+    approved: parseApprovalState(record, fallback?.approved),
     title:
       toTrimmedString(record.title) ??
       fallback?.title ??
@@ -863,6 +923,75 @@ export async function createCommunityAnswer(
   return normalizeCommunityAnswer(record, undefined, fallback);
 }
 
+async function mutateCommunityResource(path: string, init: RequestInit, fallbackMessage: string): Promise<string> {
+  const headers =
+    init.body && !(init.body instanceof FormData)
+      ? { 'Content-Type': 'application/json', ...init.headers }
+      : init.headers;
+
+  const res = await fetch(`${BASE_URL}${path}`, {
+    credentials: 'include',
+    headers,
+    ...init,
+  });
+
+  const text = await res.text().catch(() => '');
+
+  if (!res.ok) {
+    throw new Error(getApiMessage(text, res.statusText || fallbackMessage));
+  }
+
+  const parsed = parseApiText(text);
+  const statusCode = Number(parsed?.res);
+
+  if (!Number.isNaN(statusCode) && statusCode === 0) {
+    throw new Error(getApiMessage(text, fallbackMessage));
+  }
+
+  if (typeof parsed?.message === 'string' && parsed.message.trim()) {
+    return parsed.message.trim();
+  }
+
+  if (typeof parsed?.data === 'string' && parsed.data.trim()) {
+    return parsed.data.trim();
+  }
+
+  return text.trim() || fallbackMessage;
+}
+
+/** POST /community/questions/{id}/approve */
+export function approveCommunityQuestion(questionId: number | string): Promise<string> {
+  return mutateCommunityResource(
+    `/community/questions/${questionId}/approve`,
+    { method: 'POST' },
+    'Question approved successfully.',
+  );
+}
+
+/** PATCH /community/questions/{id} */
+export function updateCommunityQuestion(
+  questionId: number | string,
+  payload: UpdateCommunityQuestionPayload,
+): Promise<string> {
+  return mutateCommunityResource(
+    `/community/questions/${questionId}`,
+    {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    },
+    'Question updated successfully.',
+  );
+}
+
+/** DELETE /community/questions/{id} */
+export function deleteCommunityQuestion(questionId: number | string): Promise<string> {
+  return mutateCommunityResource(
+    `/community/questions/${questionId}`,
+    { method: 'DELETE' },
+    'Question deleted successfully.',
+  );
+}
+
 /** POST /community/answers/{id}/accept */
 export async function acceptCommunityAnswer(answerId: number | string): Promise<string> {
   const res = await fetch(`${BASE_URL}/community/answers/${answerId}/accept`, {
@@ -894,20 +1023,55 @@ export async function acceptCommunityAnswer(answerId: number | string): Promise<
   return text.trim() || 'Answer accepted successfully.';
 }
 
+/** POST /community/answers/{id}/approve */
+export function approveCommunityAnswer(answerId: number | string): Promise<string> {
+  return mutateCommunityResource(
+    `/community/answers/${answerId}/approve`,
+    { method: 'POST' },
+    'Answer approved successfully.',
+  );
+}
+
+/** PATCH /community/answers/{id} */
+export function updateCommunityAnswer(
+  answerId: number | string,
+  payload: UpdateCommunityAnswerPayload,
+): Promise<string> {
+  return mutateCommunityResource(
+    `/community/answers/${answerId}`,
+    {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    },
+    'Answer updated successfully.',
+  );
+}
+
+/** DELETE /community/answers/{id} */
+export function deleteCommunityAnswer(answerId: number | string): Promise<string> {
+  return mutateCommunityResource(
+    `/community/answers/${answerId}`,
+    { method: 'DELETE' },
+    'Answer deleted successfully.',
+  );
+}
+
 /** GET /lms/courses — optionally filter by cohort */
 export function getCourses(cohort?: string): Promise<Course[]> {
-  const params = cohort ? `?cohort=${encodeURIComponent(cohort)}` : '';
+  const params = buildCohortQuery(cohort);
   return request<Course[]>(`/lms/courses${params}`);
 }
 
-/** GET /lms/course/{id} — returns the modules (with lessons) for a course */
-export function getCourse(id: string): Promise<Module[]> {
-  return request<Module[]>(`/lms/course/${id}`);
+/** GET /lms/course/{id} — returns the modules (with lessons) for a course, with optional cohort param */
+export function getCourse(id: string, cohort?: string): Promise<Module[]> {
+  const params = buildCohortQuery(cohort);
+  return request<Module[]>(`/lms/course/${id}${params}`);
 }
 
 /** GET /lms/lesson/{id} — lesson content */
-export function getLesson(id: string | number): Promise<Lesson> {
-  return request<Lesson>(`/lms/lesson/${id}`);
+export function getLesson(id: string | number, cohort?: string): Promise<Lesson> {
+  const params = buildCohortQuery(cohort);
+  return request<Lesson>(`/lms/lesson/${id}${params}`);
 }
 
 /** POST /lms/user-progres/{userId} */

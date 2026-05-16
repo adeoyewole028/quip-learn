@@ -1,6 +1,6 @@
 
 import { useEffect, useEffectEvent, useRef, useState } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { getLesson, getUserProgress, completeLesson, submitQuiz, submitAssignmentFile } from '@/lib/api/lms';
 import type { Lesson, RawQuizQuestion, TextLessonContent, VideoLessonContent, QuizLessonContent, AssignmentLessonContent, VideoProvider } from '@/types/lms';
 import { useAuth } from '@/hooks/useAuth';
@@ -21,13 +21,28 @@ function toEmbedUrl(url: string, provider?: VideoProvider): string {
         u.hostname === 'youtu.be'
           ? u.pathname.slice(1)
           : u.searchParams.get('v');
-      if (videoId) return `https://www.youtube.com/embed/${videoId}?rel=0`;
+      if (videoId) {
+        const params = new URLSearchParams({
+          rel: '0',
+          modestbranding: '1',
+          iv_load_policy: '3',
+          playsinline: '1',
+        });
+        return `https://www.youtube-nocookie.com/embed/${videoId}?${params.toString()}`;
+      }
     }
 
     // Vimeo: https://vimeo.com/ID
     if (provider === 'vimeo' || u.hostname === 'vimeo.com') {
       const videoId = u.pathname.split('/').filter(Boolean)[0];
-      if (videoId) return `https://player.vimeo.com/video/${videoId}`;
+      if (videoId) {
+        const params = new URLSearchParams({
+          title: '0',
+          byline: '0',
+          portrait: '0',
+        });
+        return `https://player.vimeo.com/video/${videoId}?${params.toString()}`;
+      }
     }
 
     // Loom: https://www.loom.com/share/ID
@@ -39,6 +54,24 @@ function toEmbedUrl(url: string, provider?: VideoProvider): string {
     // fall through — return url as-is
   }
   return url;
+}
+
+function getSafeVideoEmbedUrl(url?: string, provider?: VideoProvider): string | null {
+  const normalizedUrl = url?.trim();
+  if (!normalizedUrl) return null;
+
+  const embedUrl = toEmbedUrl(normalizedUrl, provider).trim();
+  if (!embedUrl) return null;
+
+  try {
+    const parsed = new URL(embedUrl);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return null;
+    }
+    return parsed.toString();
+  } catch {
+    return null;
+  }
 }
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -52,15 +85,58 @@ interface QuizResult {
   timedOut: boolean;
 }
 
+const DEFAULT_MAX_QUIZ_ATTEMPTS = 3;
+
+function parseMaxAttempts(content?: QuizLessonContent): number {
+  if (!content) return DEFAULT_MAX_QUIZ_ATTEMPTS;
+
+  const candidates: unknown[] = [
+    content.max_attempts,
+    content.maxAttempts,
+    content.allowed_attempts,
+    content.allowedAttempts,
+    content.attempts,
+    content.attempt_limit,
+    content.attemptLimit,
+  ];
+
+  for (const candidate of candidates) {
+    const parsed = Number(candidate);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return Math.floor(parsed);
+    }
+  }
+
+  return DEFAULT_MAX_QUIZ_ATTEMPTS;
+}
+
+function parsePassingScore(content?: QuizLessonContent): number | null {
+  if (!content?.passing_score) return null;
+  const parsed = Number(content.passing_score);
+  if (!Number.isFinite(parsed)) return null;
+  return parsed;
+}
+
 function parseDurationToSeconds(duration?: string): number | null {
   if (!duration) return null;
   const raw = duration.trim().toLowerCase();
   if (!raw) return null;
 
-  // Supports values like: "23" (minutes), "23m", "45s", "01:30".
+  // Supports values like: "23" (minutes), "23m", "30 min", "30 mins", "45s", "01:30", "1h".
   if (/^\d+$/.test(raw)) return Number(raw) * 60;
+  if (/^\d+\s*(min|mins|minute|minutes)$/.test(raw)) {
+    const minutes = Number(raw.replace(/\s*(min|mins|minute|minutes)$/, ''));
+    return minutes * 60;
+  }
   if (/^\d+m$/.test(raw)) return Number(raw.slice(0, -1)) * 60;
   if (/^\d+s$/.test(raw)) return Number(raw.slice(0, -1));
+  if (/^\d+\s*(sec|secs|second|seconds)$/.test(raw)) {
+    return Number(raw.replace(/\s*(sec|secs|second|seconds)$/, ''));
+  }
+  if (/^\d+\s*(h|hr|hrs|hour|hours)$/.test(raw)) {
+    const hours = Number(raw.replace(/\s*(h|hr|hrs|hour|hours)$/, ''));
+    return hours * 60 * 60;
+  }
 
   const timeParts = raw.match(/^(\d{1,2}):(\d{2})$/);
   if (timeParts) {
@@ -96,6 +172,7 @@ const lessonTypeBadgeClass: Record<string, string> = {
 export default function LessonPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const location = useLocation();
   const { user } = useAuth();
   const [lesson, setLesson] = useState<Lesson | null>(null);
   const [loading, setLoading] = useState(true);
@@ -106,14 +183,42 @@ export default function LessonPage() {
   // Quiz state
   const [answers, setAnswers] = useState<Record<number, number>>({});
   const [quizResult, setQuizResult] = useState<QuizResult | null>(null);
+  // Timer state for any time-based lesson
+  const [timeLeftSeconds, setTimeLeftSeconds] = useState<number | null>(null);
   const [quizTimeLeftSeconds, setQuizTimeLeftSeconds] = useState<number | null>(null);
+  const [quizAttemptCount, setQuizAttemptCount] = useState(0);
   const autoSubmitTriggeredRef = useRef(false);
   // Assignment state
   const [assignmentText, setAssignmentText] = useState('');
   const [assignmentFile, setAssignmentFile] = useState<File | null>(null);
 
+  const navigationState = location.state as { courseId?: string; moduleId?: string } | null;
+
+  function navigateBackToCourse() {
+    const courseId = navigationState?.courseId;
+    if (!courseId) {
+      navigate(-1);
+      return;
+    }
+
+    const moduleParam = navigationState?.moduleId
+      ? `?module=${encodeURIComponent(navigationState.moduleId)}`
+      : '';
+    navigate(`/courses/${courseId}${moduleParam}`);
+  }
+
   let quizQuestions: RawQuizQuestion[] = [];
   let quizQuestionsError: string | null = null;
+  const quizContent = lesson?.type === 'quiz' ? (lesson.content as QuizLessonContent | undefined) : undefined;
+  const videoContent = lesson?.type === 'video' ? (lesson.content as VideoLessonContent | undefined) : undefined;
+  const hasValidVideoUrl =
+    lesson?.type === 'video'
+      ? Boolean(getSafeVideoEmbedUrl(videoContent?.video_url, videoContent?.provider))
+      : true;
+  const maxQuizAttempts = parseMaxAttempts(quizContent);
+  const passingScore = parsePassingScore(quizContent);
+  const quizAttemptsLeft = Math.max(0, maxQuizAttempts - quizAttemptCount);
+  const quizAttemptsExhausted = quizAttemptsLeft <= 0;
 
   if (lesson?.type === 'quiz' && lesson.content) {
     try {
@@ -129,11 +234,21 @@ export default function LessonPage() {
     let cancelled = false;
 
     Promise.all([
-      getLesson(id),
+      getLesson(id, user?.cohort ?? undefined),
       user?.id ? getUserProgress(user.id) : Promise.resolve(null),
     ])
       .then(([nextLesson, progress]) => {
         if (cancelled) return;
+
+        const attemptsStorageKey = user?.id ? `quiz-attempts:${user.id}:${nextLesson.id}` : null;
+        const storedAttemptCount = attemptsStorageKey
+          ? Number(window.localStorage.getItem(attemptsStorageKey) ?? 0)
+          : 0;
+        const normalizedAttemptCount =
+          Number.isFinite(storedAttemptCount) && storedAttemptCount > 0
+            ? Math.floor(storedAttemptCount)
+            : 0;
+
         const completedFromProgress = progress?.completedLessonIds.includes(nextLesson.id) ?? false;
         setLesson({
           ...nextLesson,
@@ -141,10 +256,17 @@ export default function LessonPage() {
         });
         setAnswers({});
         setQuizResult(null);
-        setDone(nextLesson.completed || completedFromProgress);
+        setQuizAttemptCount(nextLesson.type === 'quiz' ? normalizedAttemptCount : 0);
+        const nextMaxAttempts = nextLesson.type === 'quiz'
+          ? parseMaxAttempts(nextLesson.content as QuizLessonContent | undefined)
+          : 0;
+        const attemptsReached = nextLesson.type === 'quiz' && normalizedAttemptCount >= nextMaxAttempts;
+        setDone(nextLesson.type === 'quiz' ? attemptsReached : nextLesson.completed || completedFromProgress);
         setQuizTimeLeftSeconds(
           nextLesson.type === 'quiz' ? parseDurationToSeconds(nextLesson.duration) : null,
         );
+        // For any time-based lesson, set timer
+        setTimeLeftSeconds(nextLesson.duration ? parseDurationToSeconds(nextLesson.duration) : null);
         autoSubmitTriggeredRef.current = false;
       })
       .catch((err: Error) => {
@@ -159,14 +281,16 @@ export default function LessonPage() {
     return () => {
       cancelled = true;
     };
-  }, [id, user?.id]);
+  }, [id, user?.id, user?.cohort]);
 
+  // Timer for quizzes
   useEffect(() => {
     if (
       !lesson ||
       lesson.type !== 'quiz' ||
       done ||
       submitting ||
+      quizAttemptsExhausted ||
       quizTimeLeftSeconds === null ||
       quizTimeLeftSeconds <= 0
     ) {
@@ -182,7 +306,22 @@ export default function LessonPage() {
     }, 1000);
 
     return () => window.clearInterval(timer);
-  }, [lesson, done, submitting, quizTimeLeftSeconds]);
+  }, [lesson, done, quizResult, submitting, quizTimeLeftSeconds, quizAttemptsExhausted]);
+
+  // Timer for any time-based lesson (except quiz, which has its own logic)
+  useEffect(() => {
+    if (!lesson || lesson.type === 'quiz' || done || submitting || timeLeftSeconds === null || timeLeftSeconds <= 0) {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      setTimeLeftSeconds((prev) => {
+        if (prev === null) return null;
+        if (prev <= 1) return 0;
+        return prev - 1;
+      });
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [lesson, done, submitting, timeLeftSeconds]);
 
   async function handleMarkComplete() {
     if (!id) return;
@@ -206,6 +345,10 @@ export default function LessonPage() {
   async function handleQuizSubmit(timedOut: boolean = false) {
     if (!id) return;
     if (!lesson || lesson.type !== 'quiz') return;
+    if (quizAttemptsExhausted) {
+      setError(`You have used all ${maxQuizAttempts} attempts for this quiz.`);
+      return;
+    }
     if (!user?.id) {
       setError('You must be logged in to submit this quiz.');
       return;
@@ -245,7 +388,16 @@ export default function LessonPage() {
         score: percentageScore,
         answers: normalizedAnswers,
       });
-      setLesson((currentLesson) => (currentLesson ? { ...currentLesson, completed: true } : currentLesson));
+
+      const nextAttemptCount = quizAttemptCount + 1;
+      const attemptsStorageKey = `quiz-attempts:${user.id}:${id}`;
+      window.localStorage.setItem(attemptsStorageKey, String(nextAttemptCount));
+      setQuizAttemptCount(nextAttemptCount);
+
+      const didPass = passingScore !== null ? percentageScore >= passingScore : true;
+      setLesson((currentLesson) => (currentLesson
+        ? { ...currentLesson, completed: currentLesson.completed || didPass }
+        : currentLesson));
 
       // Set result AFTER successful submit so timedOut is always accurate.
       setQuizResult({
@@ -260,6 +412,18 @@ export default function LessonPage() {
     } finally {
       setSubmitting(false);
     }
+  }
+
+  function handleRetryQuiz() {
+    if (!lesson || lesson.type !== 'quiz') return;
+    if (quizAttemptsExhausted) return;
+
+    setError(null);
+    setAnswers({});
+    setQuizResult(null);
+    setDone(false);
+    setQuizTimeLeftSeconds(parseDurationToSeconds(lesson.duration));
+    autoSubmitTriggeredRef.current = false;
   }
 
   const submitQuizOnTimeout = useEffectEvent(() => {
@@ -304,7 +468,7 @@ export default function LessonPage() {
     <div className="max-w-3xl mx-auto px-4 sm:px-6 py-8">
       {/* Back */}
       <button
-        onClick={() => navigate(-1)}
+        onClick={navigateBackToCourse}
         className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground mb-6 transition-colors"
       >
         <ChevronLeft className="w-4 h-4" />
@@ -331,15 +495,21 @@ export default function LessonPage() {
               {lesson.duration && (
                 <span className="text-xs text-muted-foreground">{lesson.duration}</span>
               )}
-              {lesson.type === 'quiz' && quizTimeLeftSeconds !== null && !done && (
+              {/* Show countdown for any time-based lesson */}
+              {lesson.duration && !done && (
                 <span
                   className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${
-                    quizTimeLeftSeconds <= 60
+                    (lesson.type === 'quiz' ? quizTimeLeftSeconds : timeLeftSeconds) !== null && (lesson.type === 'quiz' ? quizTimeLeftSeconds : timeLeftSeconds)! <= 60
                       ? 'bg-destructive/10 text-destructive'
                       : 'bg-muted text-muted-foreground'
                   }`}
                 >
-                  Time left: {formatCountdown(quizTimeLeftSeconds)}
+                  Time left: {formatCountdown(lesson.type === 'quiz' ? quizTimeLeftSeconds ?? 0 : timeLeftSeconds ?? 0)}
+                </span>
+              )}
+              {lesson.type === 'quiz' && (
+                <span className="inline-flex items-center rounded-full bg-muted px-2.5 py-0.5 text-xs font-medium text-muted-foreground">
+                  Attempt {Math.min(quizAttemptCount + 1, maxQuizAttempts)} of {maxQuizAttempts}
                 </span>
               )}
               {lesson.completed && (
@@ -359,7 +529,9 @@ export default function LessonPage() {
               </div>
               <p className="text-lg font-semibold">
                 {lesson.type === 'quiz'
-                  ? 'Quiz submitted!'
+                  ? (quizResult && passingScore !== null && quizResult.percentageScore < passingScore
+                    ? 'Quiz submitted - not passed yet.'
+                    : 'Quiz submitted!')
                   : lesson.type === 'assignment'
                   ? 'Assignment submitted!'
                   : 'Lesson complete!'}
@@ -369,6 +541,12 @@ export default function LessonPage() {
                   ? `You got ${quizResult.correctAnswers} of ${quizResult.totalQuestions} correct (${quizResult.percentageScore}%).`
                   : 'Great work! Keep up the momentum.'}
               </p>
+              {lesson.type === 'quiz' && (
+                <p className="text-xs text-muted-foreground">
+                  Attempts used: {quizAttemptCount}/{maxQuizAttempts}
+                  {quizAttemptsLeft > 0 ? ` · ${quizAttemptsLeft} left` : ' · no attempts left'}
+                </p>
+              )}
               {lesson.type === 'quiz' && quizResult && (
                 <div className="text-sm text-muted-foreground">
                   Score: <span className="font-semibold text-foreground">{quizResult.correctAnswers}/{quizResult.totalQuestions}</span>
@@ -376,7 +554,12 @@ export default function LessonPage() {
                   {quizResult.timedOut ? ' - auto-submitted when time expired.' : ' - submitted successfully.'}
                 </div>
               )}
-              <Button variant="outline" onClick={() => navigate(-1)} className="mt-2">
+              {lesson.type === 'quiz' && quizResult && quizAttemptsLeft > 0 && (
+                <Button onClick={handleRetryQuiz} className="mt-1">
+                  Retry Quiz ({quizAttemptsLeft} attempt{quizAttemptsLeft === 1 ? '' : 's'} left)
+                </Button>
+              )}
+              <Button variant="outline" onClick={navigateBackToCourse} className="mt-2">
                 Back to course
               </Button>
             </div>
@@ -393,7 +576,24 @@ export default function LessonPage() {
               {/* Video */}
               {lesson.type === 'video' && lesson.content && (() => {
                 const vc = lesson.content as VideoLessonContent;
-                const embedUrl = toEmbedUrl(vc.video_url, vc.provider);
+                const embedUrl = getSafeVideoEmbedUrl(vc.video_url, vc.provider);
+
+                if (!embedUrl) {
+                  return (
+                    <Card className="mb-8 border-dashed">
+                      <CardContent className="flex items-start gap-3 py-5">
+                        <AlertCircle className="mt-0.5 h-5 w-5 text-muted-foreground" />
+                        <div>
+                          <p className="text-sm font-medium text-foreground">Video unavailable</p>
+                          <p className="mt-1 text-sm text-muted-foreground">
+                            This lesson does not have a valid video link yet. Please check back later.
+                          </p>
+                        </div>
+                      </CardContent>
+                    </Card>
+                  );
+                }
+
                 return (
                   <div className="mb-8">
                     <div className="rounded-2xl overflow-hidden aspect-video bg-black shadow-lg">
@@ -403,11 +603,9 @@ export default function LessonPage() {
                         allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; fullscreen"
                         allowFullScreen
                         title={lesson.title}
+                        referrerPolicy="strict-origin-when-cross-origin"
                       />
                     </div>
-                    {vc.description && (
-                      <p className="mt-3 text-sm text-muted-foreground">{vc.description}</p>
-                    )}
                   </div>
                 );
               })()}
@@ -422,6 +620,10 @@ export default function LessonPage() {
                 }
                 return (
                   <div className="space-y-5 mb-8">
+                    <p className="text-xs text-muted-foreground">
+                      You can attempt this quiz up to {maxQuizAttempts} times.
+                      {' '}Attempts used: {quizAttemptCount}/{maxQuizAttempts}.
+                    </p>
                     {quizTimeLeftSeconds !== null && quizTimeLeftSeconds <= 0 && (
                       <p className="text-sm text-destructive">
                         Time is up. Your quiz has been submitted.
@@ -475,12 +677,13 @@ export default function LessonPage() {
                       }}
                       disabled={
                         submitting ||
+                        quizAttemptsExhausted ||
                         (quizTimeLeftSeconds !== null && quizTimeLeftSeconds <= 0) ||
                         quizQuestions.length !== Object.keys(answers).length
                       }
                       className="w-full sm:w-auto"
                     >
-                      {submitting ? 'Submitting…' : 'Submit Quiz'}
+                      {submitting ? 'Submitting…' : quizAttemptsExhausted ? 'No attempts left' : 'Submit Quiz'}
                     </Button>
                   </div>
                 );
@@ -537,7 +740,16 @@ export default function LessonPage() {
               {/* Mark complete (text / video) */}
               {(lesson.type === 'text' || lesson.type === 'video') && !lesson.completed && (
                 <div className="pt-4 border-t">
-                  <Button onClick={handleMarkComplete} disabled={submitting} className="w-full sm:w-auto">
+                  {lesson.type === 'video' && !hasValidVideoUrl && (
+                    <p className="mb-2 text-sm text-muted-foreground">
+                      A valid video link is required before this lesson can be marked complete.
+                    </p>
+                  )}
+                  <Button
+                    onClick={handleMarkComplete}
+                    disabled={submitting || (lesson.type === 'video' && !hasValidVideoUrl)}
+                    className="w-full sm:w-auto"
+                  >
                     {submitting ? 'Saving…' : 'Mark as Complete'}
                   </Button>
                 </div>

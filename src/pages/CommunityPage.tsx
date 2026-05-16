@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useLocation } from 'react-router-dom';
 import {
   ArrowUpRight,
   CheckCircle2,
@@ -13,17 +13,21 @@ import {
 import { buttonVariants } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
+import { CommunityHelpButton } from '@/components/CommunityHelpButton';
 import { hotTags, type CommunityQuestionSummary } from '@/lib/community';
 import { getCommunityQuestions } from '@/lib/api/lms';
 
 type CommunityFilter = 'Newest' | 'Unanswered' | 'Trending';
 
 export default function CommunityPage() {
+  const location = useLocation();
   const [query, setQuery] = useState('');
   const [activeFilter, setActiveFilter] = useState<CommunityFilter>('Newest');
   const [questions, setQuestions] = useState<CommunityQuestionSummary[]>([]);
   const [loading, setLoading] = useState(true);
-  const [apiError, setApiError] = useState<string | null>(null);
+  const [communityError, setCommunityError] = useState<string | null>(null);
+  const locationState = location.state as { notice?: string } | null;
+  const moderationNotice = locationState?.notice ?? null;
 
   useEffect(() => {
     let cancelled = false;
@@ -31,12 +35,12 @@ export default function CommunityPage() {
     getCommunityQuestions()
       .then((liveQuestions) => {
         if (cancelled) return;
-        setApiError(null);
+        setCommunityError(null);
         setQuestions(liveQuestions);
       })
-      .catch((error) => {
+      .catch(() => {
         if (cancelled) return;
-        setApiError((error as Error).message);
+        setCommunityError("We couldn't load the community right now. Please try again.");
       })
       .finally(() => {
         if (cancelled) return;
@@ -66,10 +70,18 @@ export default function CommunityPage() {
     <div className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
       <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_20rem]">
         <section className="space-y-6">
-          {apiError && (
+          {moderationNotice && (
+            <Card className="border-primary/15 bg-primary/5 shadow-sm">
+              <CardContent className="px-6 py-4 text-sm text-foreground">
+                {moderationNotice}
+              </CardContent>
+            </Card>
+          )}
+
+          {communityError && (
             <Card className="border-destructive/20 bg-destructive/5 shadow-sm">
               <CardContent className="px-6 py-4 text-sm text-destructive">
-                {apiError}
+                {communityError}
               </CardContent>
             </Card>
           )}
@@ -91,9 +103,12 @@ export default function CommunityPage() {
               </div>
 
               <div className="flex flex-col gap-2 md:items-end">
-                <Link to="/community/ask" className={buttonVariants({ size: 'lg' })}>
-                  Ask a question
-                </Link>
+                <div className="flex flex-wrap gap-2 md:justify-end">
+                  <Link to="/community/ask" className={buttonVariants({ size: 'lg' })}>
+                    Ask a question
+                  </Link>
+                  <CommunityHelpButton size="lg" />
+                </div>
               </div>
             </CardContent>
           </Card>
@@ -101,14 +116,19 @@ export default function CommunityPage() {
           <Card className="shadow-sm">
             <CardContent className="space-y-4 px-6 py-5">
               <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-                <div className="relative w-full max-w-xl">
-                  <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-                  <Input
-                    value={query}
-                    onChange={(event) => setQuery(event.target.value)}
-                    placeholder="Search community questions, tags, or keywords"
-                    className="h-11 rounded-xl pl-9"
-                  />
+                <div className="w-full max-w-xl">
+                  <label htmlFor="community-search" className="text-sm font-medium text-foreground">
+                    Search
+                  </label>
+                  <div className="relative mt-1.5">
+                    <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                    <Input
+                      id="community-search"
+                      value={query}
+                      onChange={(event) => setQuery(event.target.value)}
+                      className="h-11 rounded-xl pl-9"
+                    />
+                  </div>
                 </div>
 
                 <div className="flex flex-wrap gap-2">
@@ -130,7 +150,7 @@ export default function CommunityPage() {
               </div>
 
               <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                <span>{loading ? 'Syncing community…' : `${filteredQuestions.length} questions`}</span>
+                <span>{loading ? 'Loading community…' : `${filteredQuestions.length} questions`}</span>
                 <span className="h-1 w-1 rounded-full bg-border" />
                 <span>Sorted like a Q&A board</span>
                 <span className="h-1 w-1 rounded-full bg-border" />
@@ -286,10 +306,6 @@ export default function CommunityPage() {
                 Courses help people learn the curriculum. Community helps them compare how the work happens in
                 real facilities.
               </p>
-              {/* <p>
-                This first version is intentionally read-focused. Posting, voting, and answer submission can be
-                wired next once the API is ready.
-              </p> */}
             </CardContent>
           </Card>
         </aside>

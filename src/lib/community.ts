@@ -1,6 +1,7 @@
 export interface CommunityQuestionSummary {
   id: number;
   authorId?: number | string;
+  approved?: boolean;
   title: string;
   excerpt: string;
   tags: string[];
@@ -17,6 +18,7 @@ export interface CommunityQuestionSummary {
 export interface CommunityAnswer {
   id: number;
   authorId?: number | string;
+  approved?: boolean;
   author: string;
   role: string;
   posted: string;
@@ -28,6 +30,7 @@ export interface CommunityAnswer {
 export interface CommunityThreadDetail {
   id: number;
   authorId?: number | string;
+  approved?: boolean;
   title: string;
   excerpt: string;
   body: string[];

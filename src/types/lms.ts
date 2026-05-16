@@ -57,11 +57,25 @@ export interface CommunityAnswerPayload {
   body: string;
 }
 
+export interface UpdateCommunityQuestionPayload {
+  title: string;
+  summary: string;
+  details: string;
+  what_tried?: string;
+  tags: string[];
+  audience: string;
+}
+
+export interface UpdateCommunityAnswerPayload {
+  body: string;
+}
+
 export interface Module {
   id: string;
   course_id: string;
   title: string;
   order_index: string;
+  live_date?: string | null;
   lessons: Lesson[];
 }
 
@@ -103,6 +117,13 @@ export interface QuizLessonContent {
   /** Serialised JSON array of RawQuizQuestion objects */
   questions_json: string;
   passing_score?: string;
+  max_attempts?: string | number;
+  maxAttempts?: string | number;
+  allowed_attempts?: string | number;
+  allowedAttempts?: string | number;
+  attempts?: string | number;
+  attempt_limit?: string | number;
+  attemptLimit?: string | number;
 }
 
 /** Shape of each item inside the parsed questions_json array */

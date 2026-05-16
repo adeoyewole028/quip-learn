@@ -26,6 +26,63 @@ const lessonIcon: Record<string, React.ReactNode> = {
   assignment: <PenLine className="w-4 h-4 text-purple-500" />,
 };
 
+function normalizeModuleLessons(lessons: Lesson[]): Lesson[] {
+  const uniqueLessons = new Map<string, Lesson>();
+
+  for (const lesson of lessons) {
+    const lessonId = lesson.id?.toString().trim();
+    if (!lessonId) continue;
+    if (!uniqueLessons.has(lessonId)) {
+      uniqueLessons.set(lessonId, lesson);
+    }
+  }
+
+  return Array.from(uniqueLessons.values());
+}
+
+function parseLiveDate(value?: string | null): Date | null {
+  if (!value || value.startsWith('0000-00-00')) return null;
+
+  const match = value.match(/^([0-9]{4})-([0-9]{2})-([0-9]{2})(?:\s+([0-9]{2}):([0-9]{2}):([0-9]{2}))?$/);
+  if (!match) return null;
+
+  const [, year, month, day, hour = '0', minute = '0', second = '0'] = match;
+  const parsedDate = new Date(
+    Number(year),
+    Number(month) - 1,
+    Number(day),
+    Number(hour),
+    Number(minute),
+    Number(second),
+  );
+
+  return Number.isNaN(parsedDate.getTime()) ? null : parsedDate;
+}
+
+function formatLiveDateLabel(liveDate?: string | null): string | null {
+  const parsedLiveDate = parseLiveDate(liveDate);
+  if (!parsedLiveDate) return null;
+
+  return parsedLiveDate.toLocaleDateString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  });
+}
+
+function isLiveDateReached(liveDate?: string | null): boolean {
+  const parsedLiveDate = parseLiveDate(liveDate);
+  if (!parsedLiveDate) return true;
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  const liveDay = new Date(parsedLiveDate);
+  liveDay.setHours(0, 0, 0, 0);
+
+  return liveDay.getTime() <= today.getTime();
+}
+
 export default function CourseDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -36,7 +93,6 @@ export default function CourseDetailPage() {
 
   const [modules, setModules] = useState<Module[]>([]);
   const [userProgress, setUserProgress] = useState<UserProgress | null>(null);
-  const [selectedModule, setSelectedModule] = useState<Module | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -52,7 +108,7 @@ export default function CourseDetailPage() {
 
       try {
         const [nextModules, nextProgress] = await Promise.all([
-          getCourse(courseId),
+          getCourse(courseId, user?.cohort ?? undefined),
           user?.id ? getUserProgress(user.id) : Promise.resolve<UserProgress | null>(null),
         ]);
 
@@ -75,21 +131,12 @@ export default function CourseDetailPage() {
     return () => {
       cancelled = true;
     };
-  }, [id, user?.id]);
-
-  if (error) {
-    return (
-      <div className="flex flex-col items-center justify-center min-h-[60vh] gap-3 text-destructive">
-        <AlertCircle className="w-8 h-8" />
-        <p className="text-sm">{error}</p>
-      </div>
-    );
-  }
+  }, [id, user?.id, user?.cohort]);
 
   const completedLessonIds = new Set(userProgress?.completedLessonIds ?? []);
   const modulesWithProgress = modules.map((module) => ({
     ...module,
-    lessons: module.lessons.map((lesson) => ({
+    lessons: normalizeModuleLessons(module.lessons).map((lesson) => ({
       ...lesson,
       completed: lesson.completed || completedLessonIds.has(lesson.id),
     })),
@@ -97,6 +144,13 @@ export default function CourseDetailPage() {
   const sortedModules = modulesWithProgress
     .slice()
     .sort((a, b) => Number(a.order_index) - Number(b.order_index));
+  const selectedModuleId = new URLSearchParams(location.search).get('module');
+  const requestedModule = selectedModuleId
+    ? sortedModules.find((module) => module.id === selectedModuleId) ?? null
+    : null;
+  const selectedModule = requestedModule && isLiveDateReached(requestedModule.live_date)
+    ? requestedModule
+    : null;
   const trackedCourseProgress = id ? userProgress?.courseProgress[id] : undefined;
   const allLessons: Lesson[] = modulesWithProgress.flatMap((module) => module.lessons);
   const completed = trackedCourseProgress?.completedLessons ?? allLessons.filter((lesson) => lesson.completed).length;
@@ -110,6 +164,37 @@ export default function CourseDetailPage() {
         .slice()
         .sort((a, b) => Number(a.order_index ?? 0) - Number(b.order_index ?? 0))
     : [];
+
+  function navigateWithModule(moduleId: string | null, replace = false) {
+    const search = moduleId ? `?module=${encodeURIComponent(moduleId)}` : '';
+    navigate(
+      {
+        pathname: location.pathname,
+        search,
+      },
+      { replace },
+    );
+  }
+
+  useEffect(() => {
+    if (!requestedModule || selectedModule) return;
+    navigate(
+      {
+        pathname: location.pathname,
+        search: '',
+      },
+      { replace: true },
+    );
+  }, [location.pathname, navigate, requestedModule, selectedModule]);
+
+  if (error) {
+    return (
+      <div className="flex flex-col items-center justify-center min-h-[60vh] gap-3 text-destructive">
+        <AlertCircle className="w-8 h-8" />
+        <p className="text-sm">{error}</p>
+      </div>
+    );
+  }
 
   return (
     <div className="max-w-3xl mx-auto px-4 sm:px-6 py-8">
@@ -180,25 +265,32 @@ export default function CourseDetailPage() {
               .slice()
               .sort((a, b) => Number(a.order_index ?? 0) - Number(b.order_index ?? 0));
             const moduleCompleted = moduleLessons.filter((lesson) => lesson.completed).length;
+            const moduleWeekNumber = Number(module.order_index) > 0 ? Number(module.order_index) : idx + 1;
+            const moduleLiveDateLabel = formatLiveDateLabel(module.live_date);
+            const moduleIsLive = isLiveDateReached(module.live_date);
+            const moduleWeekLabel = moduleLiveDateLabel
+              ? `Week ${moduleWeekNumber} – ${moduleLiveDateLabel}`
+              : `Week ${moduleWeekNumber}`;
 
             return (
               <button
                 key={module.id}
                 type="button"
-                onClick={() => setSelectedModule(module)}
-                className="group block w-full text-left"
+                onClick={() => {
+                  if (!moduleIsLive) return;
+                  navigateWithModule(module.id);
+                }}
+                disabled={!moduleIsLive}
+                className="group block w-full text-left disabled:cursor-not-allowed"
               >
-                <Card className="overflow-hidden border transition-all hover:-translate-y-0.5 hover:border-primary/40 hover:shadow-lg">
+                <Card className={`overflow-hidden border transition-all ${
+                  moduleIsLive ? 'hover:-translate-y-0.5 hover:border-primary/40 hover:shadow-lg' : 'opacity-80'
+                }`}>
                   <CardContent className="px-5 py-5">
                     <div className="flex flex-wrap items-start justify-between gap-4">
                       <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-2">
-                          <span className="flex h-6 w-6 items-center justify-center rounded-full bg-primary/10 text-[11px] font-bold text-primary shrink-0">
-                            {idx + 1}
-                          </span>
-                          {/* <span className="text-xs font-semibold uppercase tracking-[0.22em] text-muted-foreground">
-                            {module.title}
-                          </span> */}
+                        <div className={`text-xs font-semibold ${moduleIsLive ? 'text-primary' : 'text-muted-foreground'}`}>
+                          {moduleWeekLabel}
                         </div>
 
                         <div className="mt-4 flex items-start gap-3">
@@ -210,18 +302,29 @@ export default function CourseDetailPage() {
                               {module.title}
                             </p>
                             <p className="mt-1 text-sm leading-6 text-muted-foreground">
-                              {moduleLessons.length} learning item{moduleLessons.length === 1 ? '' : 's'} inside this stack.
-                              Click to open the lesson list.
+                              {moduleIsLive
+                                ? `${moduleLessons.length} lesson${moduleLessons.length === 1 ? '' : 's'} available. Click to view lessons.`
+                                : `Available ${moduleLiveDateLabel ?? 'soon'}.`}
                             </p>
                           </div>
                         </div>
                       </div>
 
-                      <div className="flex items-center gap-3 rounded-2xl border bg-muted/30 px-3 py-2 text-sm text-muted-foreground">
-                        <span>
-                          {moduleCompleted}/{moduleLessons.length} done
-                        </span>
-                        <ChevronRight className="h-4 w-4 transition-transform group-hover:translate-x-0.5" />
+                      <div className={`flex items-center gap-3 rounded-2xl border px-3 py-2 text-sm ${
+                        moduleIsLive
+                          ? 'bg-muted/30 text-muted-foreground'
+                          : 'border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-300'
+                      }`}>
+                        {moduleIsLive ? (
+                          <>
+                            <span>
+                              {moduleCompleted}/{moduleLessons.length} done
+                            </span>
+                            <ChevronRight className="h-4 w-4 transition-transform group-hover:translate-x-0.5" />
+                          </>
+                        ) : (
+                          <span>Not live yet</span>
+                        )}
                       </div>
                     </div>
 
@@ -252,7 +355,9 @@ export default function CourseDetailPage() {
       {selectedModule && (
         <div
           className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 p-0 sm:items-center sm:p-6"
-          onClick={() => setSelectedModule(null)}
+          onClick={() => {
+            navigateWithModule(null, true);
+          }}
           role="presentation"
         >
           <Card
@@ -277,7 +382,9 @@ export default function CourseDetailPage() {
                 </div>
                 <button
                   type="button"
-                  onClick={() => setSelectedModule(null)}
+                  onClick={() => {
+                    navigateWithModule(null, true);
+                  }}
                   className="inline-flex h-9 w-9 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
                   aria-label="Close lesson list"
                 >
@@ -285,15 +392,19 @@ export default function CourseDetailPage() {
                 </button>
               </div>
 
-              <div className="max-h-[calc(88vh-6.5rem)] overflow-y-auto px-3 py-3">
+              <div className="max-h-[calc(88vh-6.5rem)] overflow-y-auto px-3 pt-3 pb-14">
                 <div className="space-y-2">
                   {selectedModuleLessons.map((lesson) => (
                     <button
                       key={lesson.id}
                       type="button"
                       onClick={() => {
-                        setSelectedModule(null);
-                        navigate(`/lessons/${lesson.id}`);
+                        navigate(`/lessons/${lesson.id}`, {
+                          state: {
+                            courseId: id,
+                            moduleId: selectedModule.id,
+                          },
+                        });
                       }}
                       className="group flex w-full items-center gap-3 rounded-2xl px-4 py-4 text-left transition-colors hover:bg-muted/50"
                     >

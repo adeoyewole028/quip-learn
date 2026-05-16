@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { getCourses, getUserProgress } from '@/lib/api/lms';
+import { getCourses, getCourse, getUserProgress } from '@/lib/api/lms';
 import type { Course, UserProgress } from '@/types/lms';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -12,10 +12,26 @@ import { useAuth } from '@/hooks/useAuth';
 export default function CoursesPage() {
   const [courses, setCourses] = useState<Course[]>([]);
   const [userProgress, setUserProgress] = useState<UserProgress | null>(null);
+  const [courseLessonTotals, setCourseLessonTotals] = useState<Record<string, number>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const navigate = useNavigate();
   const { user } = useAuth();
+
+  function countUniqueLessonsForCourse(courseModules: Array<{ lessons: Array<{ id: string }> }>): number {
+    const lessonIds = new Set<string>();
+
+    for (const module of courseModules) {
+      for (const lesson of module.lessons) {
+        const lessonId = lesson.id?.toString().trim();
+        if (lessonId) {
+          lessonIds.add(lessonId);
+        }
+      }
+    }
+
+    return lessonIds.size;
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -30,10 +46,27 @@ export default function CoursesPage() {
           user?.id ? getUserProgress(user.id) : Promise.resolve<UserProgress | null>(null),
         ]);
 
+        const lessonTotalsByCourse: Record<string, number> = {};
+        const courseDetailResults = await Promise.allSettled(
+          nextCourses.map(async (course) => {
+            const modules = await getCourse(course.id, user?.cohort ?? undefined);
+            return {
+              courseId: course.id,
+              totalLessons: countUniqueLessonsForCourse(modules),
+            };
+          }),
+        );
+
+        for (const result of courseDetailResults) {
+          if (result.status !== 'fulfilled') continue;
+          lessonTotalsByCourse[result.value.courseId] = result.value.totalLessons;
+        }
+
         if (cancelled) return;
 
         setCourses(nextCourses);
         setUserProgress(nextProgress);
+        setCourseLessonTotals(lessonTotalsByCourse);
       } catch (err) {
         if (cancelled) return;
         setError((err as Error).message);
@@ -97,11 +130,18 @@ export default function CoursesPage() {
           {courses.map((course) => {
             const trackedProgress = userProgress?.courseProgress[course.id];
             const completedLessons = trackedProgress?.completedLessons ?? course.completedLessons;
-            const totalLessons = trackedProgress?.totalLessons ?? course.totalLessons;
+            const totalLessons =
+              courseLessonTotals[course.id] ??
+              trackedProgress?.totalLessons ??
+              course.totalLessons;
+            const safeCompletedLessons =
+              completedLessons != null && totalLessons != null
+                ? Math.min(completedLessons, totalLessons)
+                : completedLessons;
             const progress =
               trackedProgress?.progressPercent ??
-              (totalLessons && completedLessons != null
-                ? Math.round((completedLessons / totalLessons) * 100)
+              (totalLessons && safeCompletedLessons != null
+                ? Math.round((safeCompletedLessons / totalLessons) * 100)
                 : null);
 
             return (
@@ -112,7 +152,7 @@ export default function CoursesPage() {
                   state: {
                     course: {
                       ...course,
-                      completedLessons,
+                          completedLessons: safeCompletedLessons,
                       totalLessons,
                     },
                   },
@@ -126,7 +166,7 @@ export default function CoursesPage() {
                     className="w-full h-40 object-cover"
                   />
                 ) : (
-                  <div className="w-full h-40 bg-gradient-to-br from-primary/20 via-accent to-primary/5 flex items-center justify-center">
+                  <div className="w-full h-40 bg-linear-to-br from-primary/20 via-accent to-primary/5 flex items-center justify-center">
                     <BookOpen className="w-10 h-10 text-primary/60" />
                   </div>
                 )}
@@ -152,7 +192,7 @@ export default function CoursesPage() {
                     <>
                       <div className="flex justify-between text-xs text-muted-foreground mb-1.5">
                         <span>
-                          {completedLessons ?? 0} / {totalLessons ?? 0} lessons
+                          {safeCompletedLessons ?? 0} / {totalLessons ?? 0} lessons
                         </span>
                         <span className="font-medium text-primary">{progress}%</span>
                       </div>
